@@ -5,6 +5,9 @@ import argparse
 from pathlib import Path
 from tqdm.auto import tqdm
 from PIL import Image
+# 添加内存管理相关模块
+import gc
+import torch.cuda
 
 # 首先检查依赖项
 def check_dependencies():
@@ -322,10 +325,30 @@ def dreambooth_training(
     progress_bar = tqdm(range(max_train_steps), desc="训练进度", disable=not accelerator.is_main_process) # 仅在主进程显示进度条
     global_step = 0
     
+    # 添加内存监控参数
+    if torch.cuda.is_available() and accelerator.is_main_process:
+        print(f"初始GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+        peak_memory = 0
+    
+    # 强制垃圾回收
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # VAE 缩放因子，从 Stable Diffusion 配置中获取
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
 
-    for epoch in range(1):  # 通常一个epoch就足够了
+    # 定义内存清理函数
+    def clean_memory():
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if accelerator.is_main_process:
+                current_memory = torch.cuda.memory_allocated()/1024**2
+                nonlocal peak_memory
+                peak_memory = max(peak_memory, current_memory)
+
+    for epoch in range(3):  # 通常一个epoch就足够了
         unet.train()
         if train_text_encoder:
             text_encoder.train()
@@ -335,6 +358,10 @@ def dreambooth_training(
         for step, batch in enumerate(dataloader):
             if global_step >= max_train_steps:
                 break
+                
+            # 每10步执行一次内存清理
+            if step % 10 == 0:
+                clean_memory()
                 
             with accelerator.accumulate(unet):
                 # 准备输入
@@ -346,7 +373,9 @@ def dreambooth_training(
                     # 将 pixel_values 移到 VAE 所在的设备和类型
                     latents = vae.encode(pixel_values).latent_dist.sample()
                     latents = latents * vae.config.scaling_factor # 使用配置中的缩放因子
-
+                    # 确保在不需要时删除中间变量
+                    del pixel_values
+                    
                 # 获取相应的文本嵌入
                 with torch.no_grad():
                     # 获取 text_encoder 的实际设备
@@ -374,6 +403,8 @@ def dreambooth_training(
                     device=latents.device
                 ).long()
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                # 不再需要原始的latents
+                del latents
                 
                 # 预测噪声残差 - 更新autocast以避免警告
                 with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
@@ -444,25 +475,51 @@ def dreambooth_training(
                 optimizer.step()
                 optimizer.zero_grad()
                 
+                # 删除不再需要的计算图
+                del instance_batch if 'instance_batch' in locals() else None
+                del class_batch if 'class_batch' in locals() else None
+                del noise_pred_instance if 'noise_pred_instance' in locals() else None
+                del noise_pred_class if 'noise_pred_class' in locals() else None
+                
             # 记录和打印进度
             if accelerator.is_main_process: # 仅在主进程更新和打印
                 progress_bar.set_postfix({
                     "loss": loss.detach().item(),
                     "instance_loss": instance_loss.detach().item() if isinstance(instance_loss, torch.Tensor) else instance_loss,
-                    "class_loss": class_loss.detach().item() if isinstance(class_loss, torch.Tensor) else class_loss
+                    "class_loss": class_loss.detach().item() if isinstance(class_loss, torch.Tensor) else class_loss,
+                    "mem_mb": torch.cuda.memory_allocated()/1024**2 if torch.cuda.is_available() else 0
                 })
                 progress_bar.update(1)
+            
+            # 删除不再需要的损失变量，防止内存累积
+            del loss, instance_loss, class_loss, noise
+            if 'noisy_latents' in locals():
+                del noisy_latents
+                
+            # 如果内存占用过高，强制执行内存清理
+            if torch.cuda.is_available() and torch.cuda.memory_allocated()/1024**2 > peak_memory * 0.9:
+                clean_memory()
 
             global_step += 1
             
             if global_step >= max_train_steps: # 在内部循环检查以立即停止
                 break
         
+        # 每个epoch结束后清理内存
+        clean_memory()
+        if accelerator.is_main_process and torch.cuda.is_available():
+            print(f"Epoch结束后GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB / 峰值: {peak_memory:.2f}MB")
+        
         if global_step >= max_train_steps: # 如果是因为达到步数而退出外层循环
             break
 
     # 显式关闭进度条
     progress_bar.close()
+
+    # 最终内存清理
+    clean_memory()
+    if accelerator.is_main_process and torch.cuda.is_available():
+        print(f"训练结束后GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB / 峰值: {peak_memory:.2f}MB")
 
     # 等待所有进程完成
     accelerator.wait_for_everyone()
@@ -675,6 +732,12 @@ if __name__ == "__main__":
                 print("已取消训练。请在GPU环境下运行。")
                 exit(0)
             
+        # 训练前清理内存
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"训练前GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+        
         _, identifier = dreambooth_training( # 接收返回值，虽然可能不用
             pretrained_model_name_or_path=args.model_name,
             instance_data_dir=args.instance_data_dir,
@@ -686,6 +749,13 @@ if __name__ == "__main__":
             prior_generation_samples=args.prior_images,
             train_text_encoder=args.train_text_encoder,
         )
+        
+        # 训练后再次清理内存
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"训练后清理内存: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            
         # 添加完成消息
         if torch.cuda.is_available():
             print("\n训练过程完成。")
@@ -742,4 +812,5 @@ if __name__ == "__main__":
     
     else:
         show_quick_help()
+``` 
 
