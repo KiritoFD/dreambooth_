@@ -1,0 +1,58 @@
+# 排除模型文件和输出目录
+/output/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# 排除生成的图像目录
+/class_images/
+**/class_images/
+*.png
+*.jpg
+*.jpeg
+/test_result.png
+
+# 排除Hugging Face缓存
+/.cache/
+**/huggingface/
+
+# 排除临时文件和日志
+logs/
+*.log
+*.tmp
+temp/
+
+# 排除Python缓存文件
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 排除IDE相关文件
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 排除操作系统生成的文件
+.DS_Store
+Thumbs.db
