@@ -116,7 +116,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description="DreamBooth 训练和推理")
     parser.add_argument("--train", action="store_true", help="训练模式")
-    parser.add_argument("--resume", action="store_true", help="从检查点恢复训练")
+    parser.add_argument("--resume", action="store_true", help="从上次中断的检查点恢复训练")
     parser.add_argument("--infer", action="store_true", help="推理模式")
     parser.add_argument("--model_name", type=str, default=None, help="预训练模型名称")
     parser.add_argument("--model_path", type=str, default="./output", help="模型路径")
@@ -178,6 +178,13 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
+        # 检查是否从检查点恢复
+        checkpoint_path = os.path.join(args.model_path, "checkpoint.pt")
+        resume_training = args.resume and os.path.exists(checkpoint_path)
+        
+        if resume_training:
+            print(f"将从检查点恢复训练...")
+        
         # 执行训练
         print(f"开始训练，步数: {args.steps}")
         try:
@@ -191,7 +198,8 @@ def main():
                 train_text_encoder=args.train_text_encoder,
                 prior_generation_samples=args.prior_images,
                 train_batch_size=args.batch_size,
-                memory_mgr=memory_mgr
+                memory_mgr=memory_mgr,
+                resume_from_checkpoint=resume_training,
             )
             
             print("\n训练成功完成!")
