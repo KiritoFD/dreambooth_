@@ -20,6 +20,14 @@ except ImportError:
     HAS_THEORY_NOTES = False
     print("未找到理论笔记模块，将只显示基本训练信息...")
 
+# 导入调试工具
+try:
+    from debug_tools import DebugMonitor
+    HAS_DEBUG_TOOLS = True
+except ImportError:
+    HAS_DEBUG_TOOLS = False
+    print("未找到调试工具模块，将不会生成详细的训练日志")
+
 class DreamBoothDataset(Dataset):
     def __init__(self, instance_images_path, class_images_path, tokenizer, size=512, center_crop=True):
         self.size = size
@@ -122,8 +130,26 @@ def dreambooth_training(
     train_batch_size=1,
     seed=42,
     memory_mgr=None,
+    resume_training=False,
+    # 新增低内存优化参数
+    attention_slice_size=0,
+    gradient_checkpointing=False,
+    use_8bit_adam=False,
 ):
-    """DreamBooth核心训练逻辑"""
+    """DreamBooth核心训练逻辑
+    
+    Args:
+        ...
+        resume_training: 是否从检查点恢复训练
+        attention_slice_size: 注意力切片大小，0表示不使用切片
+        gradient_checkpointing: 是否使用梯度检查点以减少内存占用
+        use_8bit_adam: 是否使用8位精度的Adam优化器以减少内存占用
+    """
+    # 初始化调试监控器
+    debug_monitor = None
+    if HAS_DEBUG_TOOLS:
+        debug_monitor = DebugMonitor(output_dir)
+    
     # 分阶段执行训练流程，每个阶段都有对应的理论解释
     training_stages = [
         "准备工作",             # 第1阶段：环境准备和初始设置
@@ -207,6 +233,19 @@ def dreambooth_training(
     unet = UNet2DConditionModel.from_pretrained(
         pretrained_model_name_or_path, subfolder="unet"
     )
+    
+    # 应用低内存优化
+    # 1. 注意力切片
+    if attention_slice_size > 0:
+        unet.set_attention_slice(attention_slice_size)
+        print(f"已启用注意力切片，大小: {attention_slice_size}")
+    
+    # 2. 梯度检查点
+    if gradient_checkpointing:
+        unet.enable_gradient_checkpointing()
+        if train_text_encoder:
+            text_encoder.gradient_checkpointing_enable()
+        print("已启用梯度检查点以降低内存使用")
     
     # 将VAE设置为评估模式（不训练）
     vae.requires_grad_(False)
@@ -311,20 +350,37 @@ def dreambooth_training(
             print_theory_step("3", theory["title"], theory["description"])
     
     # 准备优化器
-    params_to_optimize = []
-    if train_text_encoder:
-        print("将同时优化U-Net和文本编码器")
-        params_to_optimize = list(unet.parameters()) + list(text_encoder.parameters())
-    else:
-        print("仅优化U-Net (文本编码器保持冻结)")
-        params_to_optimize = list(unet.parameters())
-    
-    optimizer = torch.optim.AdamW(
-        params_to_optimize,
-        lr=learning_rate,
-        betas=(0.9, 0.999),
-        weight_decay=1e-2,
+    params_to_optimize = (
+        list(unet.parameters()) + list(text_encoder.parameters()) 
+        if train_text_encoder else unet.parameters()
     )
+    
+    # 使用8位Adam优化器以减少内存使用
+    if use_8bit_adam:
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.AdamW8bit(
+                params_to_optimize,
+                lr=learning_rate,
+                betas=(0.9, 0.999),
+                weight_decay=1e-2,
+            )
+            print("使用8位精度Adam优化器以节省内存")
+        except ImportError:
+            print("未找到bitsandbytes库，回退到标准Adam优化器")
+            optimizer = torch.optim.AdamW(
+                params_to_optimize,
+                lr=learning_rate,
+                betas=(0.9, 0.999),
+                weight_decay=1e-2,
+            )
+    else:
+        optimizer = torch.optim.AdamW(
+            params_to_optimize,
+            lr=learning_rate,
+            betas=(0.9, 0.999),
+            weight_decay=1e-2,
+        )
     
     # 准备噪声调度器
     noise_scheduler = DDPMScheduler.from_pretrained(
@@ -350,6 +406,18 @@ def dreambooth_training(
         unet, text_encoder, optimizer, dataloader
     )
     
+    # 对VRAM使用情况进行监控和警告
+    if torch.cuda.is_available():
+        total_vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        allocated_vram = torch.cuda.memory_allocated() / 1024**3
+        vram_usage_percent = (allocated_vram / total_vram) * 100
+        
+        print(f"GPU内存使用: {allocated_vram:.2f}GB / {total_vram:.2f}GB ({vram_usage_percent:.1f}%)")
+        
+        if vram_usage_percent > 90:
+            print("\n警告: GPU内存使用率过高，可能导致OOM错误")
+            print("考虑降低prior_images数量或禁用文本编码器训练")
+    
     # 第7阶段：训练循环开始
     update_stage()
     if HAS_THEORY_NOTES:
@@ -372,8 +440,9 @@ def dreambooth_training(
     checkpoint_path = os.path.join(output_dir, "checkpoint.pt")
     start_step = 0
     
-    if os.path.exists(checkpoint_path):
-        print(f"发现检查点，尝试恢复训练...")
+    # 修改检查点恢复逻辑，使用resume_training参数
+    if resume_training and os.path.exists(checkpoint_path):
+        print(f"正在从检查点恢复训练...")
         try:
             checkpoint = torch.load(checkpoint_path)
             global_step = checkpoint["global_step"]
@@ -386,12 +455,14 @@ def dreambooth_training(
             
             # 更新进度条
             progress_bar = tqdm(range(global_step, max_train_steps), 
-                              initial=global_step, total=max_train_steps,
-                              desc="训练进度")
+                               initial=global_step, total=max_train_steps,
+                               desc="训练进度")
         except Exception as e:
             print(f"恢复训练失败: {str(e)}")
             print("将从头开始训练")
-    
+    elif os.path.exists(checkpoint_path) and not resume_training:
+        print(f"发现检查点文件，但未启用恢复训练。如需恢复训练，请使用 --resume 参数")
+
     # 训练过程监控变量
     early_stop_threshold = 3
     no_improvement_count = 0
@@ -505,6 +576,14 @@ def dreambooth_training(
                         loss_history["class"].append(cl)
                         loss_history["total"].append(tl)
                         loss_history["steps"].append(global_step)
+                        
+                        # 记录调试信息
+                        if debug_monitor:
+                            debug_monitor.log_step(global_step, max_train_steps, {
+                                "instance_loss": il,
+                                "class_loss": cl,
+                                "total_loss": tl
+                            })
                     
                     # 每200步打印训练详细状态
                     if global_step % 200 == 0 and global_step > 0 and HAS_THEORY_NOTES:
@@ -588,10 +667,18 @@ def dreambooth_training(
             print(f"1. 将标识符 '{identifier}' 与您特定的主体关联")
             print(f"2. 在保持类别一般知识的同时，记住特定主体的视觉特征")
             print(f"3. 能够根据'{instance_prompt}'生成包含特定主体的图像")
+        
+        # 记录训练成功完成
+        if debug_monitor:
+            debug_monitor.log_completion(global_step, max_train_steps, success=True)
 
     except KeyboardInterrupt:
         print("\n训练被用户中断")
-        print("保存当前模型状态...")
+        
+        # 记录中断信息
+        if debug_monitor:
+            debug_monitor.log_error("用户手动中断训练", global_step, max_train_steps)
+            debug_monitor.log_completion(global_step, max_train_steps, success=False)
         
         # 保存中断时的检查点
         if accelerator.is_local_main_process:
@@ -608,6 +695,12 @@ def dreambooth_training(
     
     except Exception as e:
         print(f"\n训练遇到错误: {str(e)}")
+        
+        # 记录错误信息
+        if debug_monitor:
+            debug_monitor.log_error(e, global_step, max_train_steps)
+            debug_monitor.log_completion(global_step, max_train_steps, success=False)
+            
         import traceback
         traceback.print_exc()
         print("\n尝试保存当前模型...")
@@ -661,7 +754,7 @@ def dreambooth_training(
                 plt.plot(loss_history["steps"], loss_history["total"], label="Total Loss")
                 plt.xlabel("Training Steps")
                 plt.ylabel("Loss")
-                plt.title(f"DreamBooth Training Loss (Completed {global_step}/{max_train_steps} Steps)")
+                plt.title("DreamBooth Training Loss")
                 plt.legend()
                 plt.savefig(os.path.join(output_dir, "training_loss.png"))
                 print(f"训练损失图表已保存至 {os.path.join(output_dir, 'training_loss.png')}")
@@ -678,23 +771,6 @@ def dreambooth_training(
         pipeline.save_pretrained(output_dir)
         print(f"模型已成功保存到 {output_dir}")
         
-        # 更准确地反映训练完成状态
-        training_percentage = global_step / max_train_steps * 100
-        if training_percentage < 90:
-            print(f"\n警告: DreamBooth训练仅完成了 {training_percentage:.1f}% ({global_step}/{max_train_steps}步)")
-            print("训练被提前终止。可能的原因:")
-            print("1. 内存不足导致程序崩溃")
-            print("2. 用户手动中断了训练")
-            print("3. 训练过程中出现了错误")
-            print("\n虽然模型已保存，但可能无法产生理想效果。建议:")
-            print(f"- 使用命令行参数 --resume 从步骤 {global_step} 继续训练")
-            print("- 或减少先验图像数量后重新开始训练")
-            print(f"- 或减少训练步数到 {global_step} 左右（如果当前结果已经可接受）")
-        else:
-            print(f"\nDreamBooth训练完成! 共执行了 {global_step}/{max_train_steps} 步 ({training_percentage:.1f}%)")
-        
-        print(f"使用标识符 '{identifier}' 在提示词中引用您的特定主体")
-        
         # 训练完成后打印应用场景理论
         if HAS_THEORY_NOTES:
             theory = get_theory_step("completion")
@@ -706,6 +782,8 @@ def dreambooth_training(
             print("【评估指标与方法】")
             print("-"*60)
             print(DreamBoothTheory.evaluation_metrics())
+    
+    print(f"\nDreamBooth训练完成！使用标识符 '{identifier}' 在提示词中引用您的特定主体")
     
     # 第11阶段：应用建议
     update_stage()
