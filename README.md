@@ -1,66 +1,91 @@
-# dreambooth
+# DreamBooth 实现教程
 
-## 摘要：
+本项目是对论文[DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation](https://arxiv.org/abs/2208.12242)的教学性实现。
 
-these  models  lack  the  ability  to  mimic（模仿）  the  appearance  of subjects in a given reference set and synthesize（生成） novel renditions（表现） of them in different contexts.缺乏把参考物体生成到新场景的能力
+## 项目概述
 
-Given as input just a few images of a sub-ject, we fine-tune a pretrained text-to-image model such thatit learns to bind a unique identifier with that specific sub-ject.
+DreamBooth是一种革命性的技术，允许用户使用极少量（3-5张）特定主体的图像来个性化大型文本到图像模型。通过精心设计的微调过程，DreamBooth能够将特定主体的视觉特征与一个独特的标识符绑定，使得用户可以在各种情境、姿势和艺术风格中生成该主体的图像。
 
-用少数几张图片微调模型，把独特的识别词和特定对象联系起来
+## 理论基础
 
-By leveraging the semantic prior embed-ded in the model with a new autogenous class-specific priorpreservation  loss,利用模型里原有的先验语义
+### 核心思想
 
-和新的 先验保留损失函数 
+1. **主体-标识符绑定**：使用罕见词作为标识符，将其与特定主体的外观关联起来
+2. **类别知识保留**：通过"先验保留损失"确保模型不会忘记类别的一般特征
+3. **个性化与泛化的平衡**：在保持主体身份的同时，允许创意变化
 
-## 1.引言
+### 关键技术
 
-文生图模型有强大的 大量学习的先验语义，但缺乏模仿参考图的能力
+- **稀有令牌选择**：从词表中选择在自然语言中罕见的标识符
+- **先验保留机制**：通过生成和训练类别图像来保持模型的类别知识
+- **自适应训练策略**：损失函数设计和训练技巧，确保有效学习
 
-希望扩大图文映射，把新的词绑定到用户给出的物体上
+## 使用指南
 
-使用的prompt是罕见词+主题名（利用已有语义映射）表达一只特殊的狗，同时不会导致语言漂移污染模型对“狗”的识别
+### 安装依赖
 
-给出了一个新的评估方法；
+```bash
+# 创建conda环境
+conda create -n dreambooth python=3.9
+conda activate dreambooth
 
-## 2.相关工作（先跳过）
+# 安装PyTorch (CUDA 11.7/11.8)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
 
-## 3.方法
+# 安装其他依赖
+pip install diffusers==0.19.3 transformers==4.30.2 accelerate xformers
+pip install pillow tqdm numpy
+```
 
-利用随意的几张图片，根据提示词的变化（如改方向视角）生成新的图片
+### 基本使用
 
-### 1.文生图扩散模型
+1. **训练模式**:
 
-    扩散模型：高斯去噪
+```bash
+python dreambooth_implementation.py --train --instance_data_dir ./my_images --class_prompt "a dog"
+```
 
-初始噪声分布  ∼N(0,I)，文字编码成向量c,图片xgen=ˆxθ(,c).  
-使用平方损失函数：Ex,c,,t[wt‖ˆxθ(αtx+σt,c)−x‖22]
-### 2.个性化模型：
-    首先把物体植入输出域内，但调优容易过拟合、语义漂移，之前的工作致力于生成分布相似的图像不要求主题一致 
-#### 设计罕见的提示词
-使用"a [identifier] [class noun]"格式
-[identifier]：与主题关联的唯一标识符（通常是罕见词）
-[class noun]：主题的粗略类别（如：狗、猫、手表等），锚定类别先验：将模型对该类别的已有知识与特定主题联系起来
+2. **推理模式**:
 
-#### 稀有词标记
-我们发现现有的英语单词（例如"unique"、"special"）并不是最优选择，因为模型必须学会将它们与原始含义分离，并重新将它们与我们的主题关联起来。这促使我们需要一个在语言模型和扩散模型中都具有弱先验的标识符。
+```bash
+python dreambooth_implementation.py --infer --model_path ./output --prompt "a sks dog on the beach"
+```
 
-一种有风险的方法是选择英语中的随机字符并将它们连接起来生成稀有标识符（例如"xxy5syt00"）。实际上，分词器可能会单独分析每个字母，而扩散模型对这些字母有较强的先验。我们发现这些标识符会产生与使用常见英语单词类似的弱点。
+3. **查看DreamBooth原理**:
 
-我们的方法是在词汇表中寻找稀有标记，然后将这些标记转换回文本空间，以最小化标识符具有强先验的概率。我们在词汇表中执行稀有标记查找，并获得稀有标记标识符序列f(V̂)，其中f是分词器（一个将字符序列映射到令牌的函数），V̂是源自令牌f(V̂)的解码文本。序列可以具有可变长度k，我们发现相对较短的序列k={1,...,3}效果良好。
+```bash
+python dreambooth_implementation.py --explain
+```
 
-然后，通过使用解标记器对f(V̂)对词汇表进行反转，我们获得一个定义我们唯一标识符V̂的字符序列。对于Imagen，我们发现使用对应于3个或更少Unicode字符（不含空格）的均匀随机采样标记，并使用T5-XXL标记器范围为{5000,...,10000}的标记效果良好。
+4. **创建技术指南**:
 
-### 3.类特定先验保留损失
-在我们的经验中，要获得最佳的主体保真度，需要微调模型的所有层。这包括微调那些受文本嵌入条件影响的层，但这也引发了**语言漂移**问题。语言漂移是在语言模型中观察到的一个问题，即模型在大规模文本语料库上预训练后，再针对特定任务进行微调时，会逐渐失去语言的句法和语义知识。据我们所知，我们是首次发现类似现象影响扩散模型，表现为模型慢慢"忘记"如何生成与目标主体同类的其他对象。
+```bash
+python dreambooth_implementation.py --create_guide
+```
 
-另一个问题是**输出多样性降低**的可能性。文本到图像的扩散模型本身具有高度的输出多样性。在少量图像上微调时，我们希望能够在新的视角、姿势和表达中生成主体。但存在输出姿势和视角多样性减少的风险（例如，仅局限于少量训练图像的视角）。我们观察到这种情况很常见，特别是在模型训练时间过长时。
+### 高级用法
 
-为了缓解上述两个问题，我们提出了一种**自源类特定先验保留损失**，以鼓励多样性并对抗语言漂移。本质上，我们的方法是用模型自己生成的样本来监督模型，以便在少量样本微调开始后保留先验知识。这使模型能够生成类别先验的多样化图像，并保留关于类别先验的知识，从而与特定实例的知识结合使用。
+```bash
+# 训练并生成示例应用
+python dreambooth_implementation.py --train --instance_data_dir ./my_dog_images --class_prompt "a dog" --examples
 
-具体来说，我们通过在冻结的预训练扩散模型上使用祖先采样器生成数据xpr=x^(zt1,cpr)，其中包含随机初始噪声zt1∼N(0,I)和条件向量cpr:=Γ(f("a [class noun]"))。损失函数变为：
+# 创建实验报告
+python dreambooth_implementation.py --train --instance_data_dir ./my_dog_images --class_prompt "a dog" --create_report
+```
 
-Ex,c,ε,ε',t[wt‖x^θ(αtx+σtε,c)-x‖²₂+λwt'‖x^θ(αt'xpr+σt'ε',cpr)-xpr‖²₂]
+## 最佳实践
 
-其中第二项是先验保留项，用模型自己生成的图像来监督模型，λ控制这个项的相对权重。
+- **实例图像准备**：使用3-5张具有相似视角和清晰背景的主体图像
+- **类别选择**：选择一个基本级别的类别名称（如"dog"、"cat"、"person"）
+- **训练参数**：
+  - 学习率: 5e-6
+  - 训练步数: 800-1000
+  - 先验权重λ: 1.0
 
-尽管简单，但我们发现这种先验保留损失在鼓励输出多样性和克服语言漂移方面非常有效。我们还发现可以训练模型更多迭代而不会过拟合。我们发现对于Imagen，约1000次迭代，λ=1，学习率10⁻⁵；对于Stable Diffusion，学习率为5×10⁻⁶，主体数据集大小为3-5张图像，就足以获得良好的结果。在此过程中，会生成约1000个"a [class noun]"样本，但实际上可以使用更少的样本。
+## 论文相关段落解析
+
+> "我们的方法通过使用包含特定主体的少量图像（通常为3至5张）来微调大型文本到图像模型。为此，我们引入了一种将主体绑定到一个稀有标识符上的方法，并使用先验保留损失来防止语言漂移的同时保持生成多样性。" -- Ruiz等人, DreamBooth论文摘要
+
+## 贡献与反馈
+
+欢迎提交问题和改进建议。本项目旨在提供DreamBooth论文的教学实现，帮助学习者理解其核心原理。

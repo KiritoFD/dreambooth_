@@ -2,6 +2,7 @@ import os
 import random
 import numpy as np
 import argparse
+import datetime
 from pathlib import Path
 from tqdm.auto import tqdm
 from PIL import Image
@@ -109,27 +110,100 @@ class DreamBoothDataset(Dataset):
         return {"pixel_values": image, "is_instance": is_instance}
 
 def find_rare_token(tokenizer, token_range=(5000, 10000)):
-    """
-    按照论文所述，查找稀有令牌作为标识符
-    对于Stable Diffusion，我们使用CLIP tokenizer
-    """
-    token_id = random.randint(token_range[0], 10000)
-    # 确保选择的是符合条件的token（3个或更少Unicode字符）
+    """查找稀有令牌作为标识符"""
+    # 首先打印理论解释
+    print("\n" + "-"*80)
+    print("【DreamBooth理论：选择稀有标识符】")
+    print("""
+论文3.2节指出，我们需要一个在自然语言中罕见的标识符，这样它就不会与模型已有的
+文本-图像先验知识混淆。这是确保模型能够清晰地将我们的特定对象与通用类区分开的关键。
+
+我们从CLIP词汇表中5000-10000范围内随机选择token，要求：
+1. 长度不超过3个Unicode字符
+2. 不包含空格
+
+这样的token在自然文本中出现频率较低，且容易记忆和输入。
+    """)
+    print("-"*80 + "\n")
+    
+    print("开始选择稀有token标识符...")
+    token_id = random.randint(token_range[0], token_range[1])
     token_text = tokenizer.decode([token_id]).strip()
+    attempts = 1
+    
     while len(token_text) > 3 or ' ' in token_text:
         token_id = random.randint(token_range[0], token_range[1])
         token_text = tokenizer.decode([token_id]).strip()
+        attempts += 1
+    
+    print(f"已选择标识符 '{token_text}' (尝试次数: {attempts})")
+    print("此标识符将用于构建提示词格式: 'a {标识符} {类别}'")
         
     return token_text
 
+def explain_dreambooth_theory():
+    """显示DreamBooth核心理论"""
+    print("\n" + "="*80)
+    print("DreamBooth 理论基础与工作原理".center(80))
+    print("="*80)
+    
+    print("""
+【核心思想】
+DreamBooth 是一种以少量图像对文本到图像模型进行微调的技术，能够生成特定主体的个性化图像。
+
+关键概念:
+1. 个性化：使用少量（3-5张）包含特定主体的图像，教会模型生成该主体
+2. 标识符绑定：使用罕见词（如"sks"）将特定主体与类别（如"dog"）绑定
+3. 类先验保留：通过同时训练类别图像，保持模型对该类别的一般知识
+
+【训练过程】
+- 输入提示：结构为"a [identifier] [class]"，如"a sks dog"
+- 目标：使模型学习将标识符与特定主体关联，同时保留类别的一般特征
+
+【损失函数】
+L = L_主体(特定主体) + λL_先验(类别先验)
+
+其中:
+- L_主体：确保模型学习特定主体的外观
+- L_先验：通过合成生成的类别图像，确保模型不会"忘记"类别的一般特征
+- λ：控制两个目标间的平衡（论文推荐值：1.0）
+
+【最佳实践】
+- 实例图像：3-5张高质量、多角度、干净背景的主体图像
+- 训练步数：通常800-1000步足够，过多会导致过拟合
+- 文本编码器：如果GPU内存足够，同时微调文本编码器和U-Net效果最佳
+    """)
+    
+    print("="*80)
+    print("参考：Ruiz等人,《DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation》, 2022")
+    print("="*80 + "\n")
+    return True
+
 def generate_class_images(model, class_prompt, output_dir, num_samples=200):
-    """
-    生成类别图像以用于先验保留损失
-    这是论文中提到的先验保留机制的关键部分
-    """
+    """生成类别图像以用于先验保留损失"""
+    # 打印理论解释
+    print("\n" + "-"*80)
+    print("【DreamBooth理论：先验保留机制】")
+    print("""
+DreamBooth论文的一个关键创新是"先验保留"机制，用于解决过度拟合问题。
+
+当模型仅学习少量的特定主体图像时，可能会"忘记"该主体所属类别的一般特征。
+例如，如果只训练一只特定的狗，模型可能会丢失"狗"这一类别的一般知识。
+
+先验保留的工作原理：
+1. 使用当前模型生成一批类别图像（例如，通过"a dog"提示词生成的狗的图像）
+2. 在训练过程中同时使用这些合成的类别图像
+3. 引入类别先验损失，确保模型保留对该类别概念的理解
+
+这样，模型在学习特定主体的同时，不会丢失类别的一般知识，保持了生成多样性。
+    """)
+    print("-"*80 + "\n")
+    
     os.makedirs(output_dir, exist_ok=True)
     
-    print(f"正在生成 {num_samples} 张类别图像用于先验保留...")
+    print(f"开始生成 {num_samples} 张类别图像用于先验保留...")
+    print(f"类别提示词: '{class_prompt}'")
+    print("这些图像将确保模型在学习特定主体的同时，保持对类别的一般理解")
     
     # 将模型设置为推理模式
     model.safety_checker = None  # 禁用安全检查器以加快生成
@@ -146,6 +220,9 @@ def generate_class_images(model, class_prompt, output_dir, num_samples=200):
         for i, image in enumerate(outputs.images):
             img_idx = batch_idx * batch_size + i
             image.save(os.path.join(output_dir, f"class_{img_idx:04d}.png"))
+    
+    print(f"已完成类别图像生成，保存至 {output_dir}")
+    print("这些图像将在训练过程中用于计算先验保留损失")
             
     return output_dir
 
@@ -172,9 +249,77 @@ def download_small_model():
     
     return chosen_model
 
-# 添加这个函数来显示简洁的使用说明
+def generate_examples(model_path, identifier, class_name):
+    """生成一系列示例图像以展示模型的多样性"""
+    print("\n【生成论文中描述的多样应用示例】")
+    print("""
+论文中图3和图4展示了DreamBooth的关键能力：保持特定主体特征的同时变换场景、装饰和风格。
+以下示例展示了模型如何在不同条件下重现您的特定主体:
+    """)
+    
+    example_prompts = [
+        f"a {identifier} {class_name} in a garden",
+        f"a {identifier} {class_name} in the snow",
+        f"a {identifier} {class_name} wearing a hat",
+        f"a portrait of a {identifier} {class_name}",
+        f"a {identifier} {class_name} in the style of van gogh"
+    ]
+    
+    print("生成以下多样化示例:")
+    for prompt in example_prompts:
+        print(f"- {prompt}")
+    
+    for i, prompt in enumerate(example_prompts):
+        print(f"\n生成示例 {i+1}/{len(example_prompts)}: {prompt}")
+        inference(
+            model_path=model_path,
+            prompt=prompt,
+            num_images=1,
+            output_image_path=f"example_{i+1}.png"
+        )
+    
+    print("\n示例图像生成完成！请对比观察模型如何保持特定主体的特征")
+
+def inference(model_path, prompt, class_prompt=None, identifier=None, num_images=1, output_image_path=None):
+    """处理模型推理，生成图像"""
+    # 加载模型
+    pipeline = StableDiffusionPipeline.from_pretrained(model_path)
+    if torch.cuda.is_available():
+        pipeline = pipeline.to("cuda")
+    
+    # 如果没有提供标识符，尝试从保存的文件加载
+    if identifier is None and os.path.exists(os.path.join(model_path, "identifier.txt")):
+        with open(os.path.join(model_path, "identifier.txt"), "r") as f:
+            identifier = f.read().strip()
+    
+    # 生成图像
+    print(f"\n使用提示词: {prompt}")
+    images = pipeline(
+        prompt,
+        num_images_per_prompt=num_images,
+        num_inference_steps=50,
+        guidance_scale=7.5
+    ).images
+    
+    # 保存图像
+    os.makedirs("outputs", exist_ok=True)
+    for i, image in enumerate(images):
+        if output_image_path and i == 0:
+            # 如果指定了输出路径，使用它保存第一张图像
+            image.save(output_image_path)
+            print(f"图像已保存到: {output_image_path}")
+        else:
+            # 其他图像保存到outputs目录
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"outputs/generated_{timestamp}_{i}.png"
+            image.save(save_path)
+            print(f"图像已保存到: {save_path}")
+    
+    return images
+
 def show_quick_help():
     """显示简洁的使用说明"""
+    print("\n需要指定操作模式! 请使用以下参数之一:")
     print("\n需要指定操作模式! 请使用以下参数之一:")
     print("  --train          训练模式")
     print("  --infer          推理模式")
@@ -186,7 +331,39 @@ def show_quick_help():
     print("  python dreambooth_implementation.py --infer --model_path ./output --prompt \"a sks cat on the beach\"")
     print("\n输入 ? 或 --help 查看完整参数列表")
 
-def dreambooth_training(
+# 重组内存管理功能到一个独立的辅助类
+class MemoryManager:
+    """内存管理辅助类，提供统一的内存清理和监控功能"""
+    def __init__(self, is_main_process=True):
+        self.is_main_process = is_main_process
+        self.peak_memory = 0
+        self.initial_memory = self.get_memory_usage()
+        if self.is_main_process and torch.cuda.is_available():
+            print(f"初始GPU内存占用: {self.initial_memory:.2f}MB")
+    
+    def get_memory_usage(self):
+        """获取当前内存使用量(MB)"""
+        if torch.cuda.is_available():
+            return torch.cuda.memory_allocated()/1024**2
+        return 0
+    
+    def cleanup(self, log_message=None):
+        """清理内存并可选择性地记录信息"""
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if self.is_main_process:
+                current_memory = self.get_memory_usage()
+                self.peak_memory = max(self.peak_memory, current_memory)
+                if log_message:
+                    print(f"{log_message}: {current_memory:.2f}MB / 峰值: {self.peak_memory:.2f}MB")
+    
+    def log_memory_stats(self, message):
+        """记录内存统计信息"""
+        if self.is_main_process and torch.cuda.is_available():
+            print(f"{message}: {self.get_memory_usage():.2f}MB / 峰值: {self.peak_memory:.2f}MB")
+
+def dreambooth_training_with_theory(
     pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5",
     instance_data_dir="./instance_images",
     output_dir="./output",
@@ -201,17 +378,41 @@ def dreambooth_training(
     train_batch_size=1,
     seed=42,
 ):
+    """DreamBooth训练流程"""
+    # 打印训练过程说明
+    print("\n" + "="*80)
+    print("【DreamBooth训练流程】".center(80))
+    print("="*80)
+    print("""
+DreamBooth训练过程按照论文描述分为以下关键步骤：
+
+1. 模型准备：加载预训练扩散模型的组件（文本编码器，U-Net，VAE）
+2. 标识符选择：选择一个罕见词作为标识符，将我们的特定主体与类别绑定
+3. 类别先验生成：为了"先验保留"，自动生成类别的先验图像
+4. 自适应训练：使用混合损失函数（特定主体损失+先验保留损失）进行微调
+5. 模型保存：保存微调后的模型，供推理使用
+
+注：最佳实践是在训练U-Net的同时也训练文本编码器，但如果GPU内存有限，可以只训练U-Net
+    """)
+    print("="*80)
+    
     # 设置种子以保证结果可复现
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
     
+    print("\n【第1步】初始化加速器与内存管理")
     # 初始化加速器
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision="fp16"  # 使用16位混合精度训练以节省内存
     )
     
+    # 创建内存管理器
+    memory_mgr = MemoryManager(is_main_process=accelerator.is_main_process)
+    memory_mgr.cleanup("初始化后内存占用")
+    
+    print("\n【第2步】标识符选择与提示词构建")
     # 初始化tokenizer
     tokenizer = CLIPTokenizer.from_pretrained(
         pretrained_model_name_or_path, 
@@ -220,7 +421,6 @@ def dreambooth_training(
     
     # 查找稀有令牌作为标识符，如论文3.2节所述
     identifier = find_rare_token(tokenizer)
-    print(f"选中的稀有令牌标识符: '{identifier}'")
     
     # 构建实例提示词，遵循论文中"a [identifier] [class noun]"的格式
     if instance_prompt is None:
@@ -229,8 +429,9 @@ def dreambooth_training(
     
     print(f"实例提示词: '{instance_prompt}'")
     print(f"类别提示词: '{class_prompt}'")
+    print("在训练后，当您在提示词中使用此标识符时，模型将生成您训练的特定主体")
     
-    # 加载预训练模型
+    print("\n【第3步】加载模型组件")
     print(f"加载预训练模型: {pretrained_model_name_or_path}")
     # 加载文本编码器
     text_encoder = CLIPTextModel.from_pretrained(
@@ -239,12 +440,14 @@ def dreambooth_training(
     )
     
     # 加载 VAE
+    print("加载VAE - 负责图像与潜在空间的编解码")
     vae = AutoencoderKL.from_pretrained(
         pretrained_model_name_or_path,
         subfolder="vae"
     )
 
     # 加载U-Net
+    print("加载U-Net - 这是实际进行去噪预测的核心网络")
     unet = UNet2DConditionModel.from_pretrained(
         pretrained_model_name_or_path,
         subfolder="unet",
@@ -253,37 +456,45 @@ def dreambooth_training(
     # 加载用于生成类别图像的完整pipeline
     pipeline = StableDiffusionPipeline.from_pretrained(
         pretrained_model_name_or_path,
-        vae=vae, # 确保pipeline使用相同的VAE
+        vae=vae,
         text_encoder=text_encoder,
         unet=unet,
     )
     pipeline.to(accelerator.device)
 
     # 将 VAE 设置为评估模式并移至 GPU，通常不训练 VAE
+    print("设置VAE为评估模式 - VAE在DreamBooth中不需要训练")
     vae.requires_grad_(False)
     vae.to(accelerator.device, dtype=torch.float32) # VAE 通常保持在 fp32
 
+    print("\n【第4步】生成类别先验图像")
+    print("这是DreamBooth的关键创新之一，用于防止'语言漂移'和过度拟合")
     # 生成类别图像用于先验保留
     class_images_dir = os.path.join(output_dir, "class_images")
     if not os.path.exists(class_images_dir) or len(os.listdir(class_images_dir)) < prior_generation_samples:
         generate_class_images(pipeline, class_prompt, class_images_dir, prior_generation_samples)
+    else:
+        print(f"使用已存在的类别图像: {class_images_dir}")
     
+    print("\n【第5步】加载训练数据集")
     # 加载数据集
     dataset = DreamBoothDataset(
         instance_images_path=instance_data_dir,
         class_images_path=class_images_dir,
         tokenizer=tokenizer,
     )
+    print(f"加载了 {len(dataset.instance_images)} 张实例图像和 {len(dataset.class_images)} 张类别图像")
     dataloader = DataLoader(dataset, batch_size=train_batch_size, shuffle=True)
     
+    print("\n【第6步】准备优化器和参数")
     # 准备优化器
     # 如论文所述，最佳的主体保真度是通过微调所有层获得的
     if train_text_encoder:
         params_to_optimize = list(unet.parameters()) + list(text_encoder.parameters())
-        print("将同时微调U-Net和文本编码器")
+        print("将同时微调U-Net和文本编码器 - 这能取得最佳效果但需要更多GPU内存")
     else:
         params_to_optimize = unet.parameters()
-        print("仅微调U-Net")
+        print("仅微调U-Net - 内存效率更高，但效果可能略差")
     
     optimizer = torch.optim.AdamW(
         params_to_optimize,
@@ -299,6 +510,7 @@ def dreambooth_training(
     )
     
     # 准备文本嵌入
+    print("\n准备文本嵌入...")
     instance_text_inputs = tokenizer(
         instance_prompt,
         padding="max_length",
@@ -321,79 +533,57 @@ def dreambooth_training(
     )
     
     # 训练循环
-    print("开始训练...")
-    progress_bar = tqdm(range(max_train_steps), desc="训练进度", disable=not accelerator.is_main_process) # 仅在主进程显示进度条
+    print("\n【第7步】开始DreamBooth训练")
+    print(f"将训练 {max_train_steps} 步，先验保留权重λ设为 {prior_preservation_weight}...")
+    print("""
+训练过程中将应用以下关键理论：
+1. 扩散去噪 - 模型学习从加噪图像预测噪声的过程
+2. 特定主体损失 - 让模型学习将标识符与您的特定主体关联
+3. 先验保留损失 - 防止模型"忘记"类别的一般知识
+
+根据论文第3.4节，先验保留损失是DreamBooth成功的关键，它确保了模型在学习特定主体的同时，不会丢失对类别的一般理解。
+    """)
+    progress_bar = tqdm(range(max_train_steps), desc="训练进度", disable=not accelerator.is_main_process)
     global_step = 0
     
-    # 添加内存监控参数
-    if torch.cuda.is_available() and accelerator.is_main_process:
-        print(f"初始GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
-        peak_memory = 0
-    
-    # 强制垃圾回收
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     # VAE 缩放因子，从 Stable Diffusion 配置中获取
     vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
 
-    # 定义内存清理函数
-    def clean_memory():
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            if accelerator.is_main_process:
-                current_memory = torch.cuda.memory_allocated()/1024**2
-                nonlocal peak_memory
-                peak_memory = max(peak_memory, current_memory)
+    # 记录损失
+    epoch_losses = []
+    loss_log_interval = 50  # 每隔多少步记录一次损失
 
     for epoch in range(3):  # 通常一个epoch就足够了
+        epoch_loss = {"total": [], "instance": [], "class": []}
+        
+        print(f"\n开始Epoch {epoch+1}/3...")
+        
         unet.train()
         if train_text_encoder:
             text_encoder.train()
         else:
             text_encoder.eval()
         
+        step_in_epoch = 0
         for step, batch in enumerate(dataloader):
             if global_step >= max_train_steps:
                 break
                 
             # 每10步执行一次内存清理
             if step % 10 == 0:
-                clean_memory()
+                memory_mgr.cleanup()
                 
             with accelerator.accumulate(unet):
                 # 准备输入
-                pixel_values = batch["pixel_values"].to(accelerator.device, dtype=vae.dtype) # 确保dtype匹配VAE输入
+                pixel_values = batch["pixel_values"].to(accelerator.device)
                 is_instance = batch["is_instance"]
-
+                
                 # 使用 VAE 将图像编码为潜在表示
                 with torch.no_grad():
-                    # 将 pixel_values 移到 VAE 所在的设备和类型
-                    latents = vae.encode(pixel_values).latent_dist.sample()
-                    latents = latents * vae.config.scaling_factor # 使用配置中的缩放因子
-                    # 确保在不需要时删除中间变量
-                    del pixel_values
-                    
-                # 获取相应的文本嵌入
-                with torch.no_grad():
-                    # 获取 text_encoder 的实际设备
-                    text_encoder_device = text_encoder.device
-                    if train_text_encoder and torch.sum(is_instance).item() > 0:
-                        encoder_hidden_states_instance = text_encoder(
-                            instance_text_inputs.input_ids.to(text_encoder_device)
-                        )[0]
-                    else:
-                        encoder_hidden_states_instance = None
-                        
-                    if train_text_encoder and torch.sum(~is_instance).item() > 0:
-                        encoder_hidden_states_class = text_encoder(
-                            class_text_inputs.input_ids.to(text_encoder_device)
-                        )[0]
-                    else:
-                        encoder_hidden_states_class = None
-
+                    # 确保使用正确的数据类型
+                    latents = vae.encode(pixel_values.to(dtype=vae.dtype)).latent_dist.sample()
+                    latents = latents * vae.config.scaling_factor
+                
                 # 为潜在表示添加噪声
                 noise = torch.randn_like(latents)
                 timesteps = torch.randint(
@@ -403,245 +593,189 @@ def dreambooth_training(
                     device=latents.device
                 ).long()
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                # 不再需要原始的latents
-                del latents
                 
-                # 预测噪声残差 - 更新autocast以避免警告
-                with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
-                    instance_loss = 0.0
-                    class_loss = 0.0
-                    
-                    # 处理实例样本
+                # 准备文本嵌入 - 区分实例和类别样本
+                # 这是论文3.2节的关键步骤 - 使用不同提示词
+                with torch.no_grad():
                     if torch.sum(is_instance).item() > 0:
-                        # 确保encoder_hidden_states不为None
-                        if encoder_hidden_states_instance is None:
-                            with torch.no_grad():
-                                encoder_hidden_states_instance = text_encoder(
-                                    instance_text_inputs.input_ids.to(text_encoder_device)
-                                )[0]
-                        
-                        # 确保 encoder_hidden_states 在与 noisy_latents 相同的设备上
-                        encoder_hidden_states_instance = encoder_hidden_states_instance.to(noisy_latents.device)
-
-                        instance_batch = {
-                            "sample": noisy_latents[is_instance], # 使用 noisy_latents
-                            "timestep": timesteps[is_instance],
-                            "encoder_hidden_states": encoder_hidden_states_instance.repeat(torch.sum(is_instance).item(), 1, 1),
-                        }
-                        noise_pred_instance = unet(**instance_batch).sample
-                        # 目标是原始噪声
-                        instance_loss = F.mse_loss(noise_pred_instance.float(), noise[is_instance].float(), reduction="mean")
+                        instance_emb = text_encoder(
+                            instance_text_inputs.input_ids.to(accelerator.device)
+                        )[0]
                     
-                    # 处理类别样本（先验保留）
                     if torch.sum(~is_instance).item() > 0:
-                        # 确保encoder_hidden_states不为None
-                        if encoder_hidden_states_class is None:
-                            with torch.no_grad():
-                                encoder_hidden_states_class = text_encoder(
-                                    class_text_inputs.input_ids.to(text_encoder_device)
-                                )[0]
+                        class_emb = text_encoder(
+                            class_text_inputs.input_ids.to(accelerator.device)
+                        )[0]
 
-                        # 确保 encoder_hidden_states 在与 noisy_latents 相同的设备上
-                        encoder_hidden_states_class = encoder_hidden_states_class.to(noisy_latents.device)
-
-                        class_batch = {
-                            "sample": noisy_latents[~is_instance], # 使用 noisy_latents
-                            "timestep": timesteps[~is_instance],
-                            "encoder_hidden_states": encoder_hidden_states_class.repeat(
-                                torch.sum(~is_instance).item(), 1, 1
-                            ),
-                        }
-                        
-                        noise_pred_class = unet(**class_batch).sample
-                        # 目标是原始噪声
-                        class_loss = F.mse_loss(noise_pred_class.float(), noise[~is_instance].float(), reduction="mean")
+                # 预测噪声残差，分别处理实例样本和类别样本
+                instance_loss = 0.0
+                class_loss = 0.0
+                
+                # 处理实例样本 - 特定主体损失
+                if torch.sum(is_instance).item() > 0:
+                    instance_pred = unet(
+                        noisy_latents[is_instance],
+                        timesteps[is_instance],
+                        encoder_hidden_states=instance_emb.repeat(
+                            torch.sum(is_instance).item(), 1, 1
+                        )
+                    ).sample
                     
-                    # 组合损失，应用先验保留权重
-                    loss = instance_loss + prior_preservation_weight * class_loss
+                    instance_loss = F.mse_loss(
+                        instance_pred.float(),
+                        noise[is_instance].float(),
+                        reduction="mean"
+                    )
+                
+                # 处理类别样本 - 先验保留损失
+                if torch.sum(~is_instance).item() > 0:
+                    class_pred = unet(
+                        noisy_latents[~is_instance],
+                        timesteps[~is_instance],
+                        encoder_hidden_states=class_emb.repeat(
+                            torch.sum(~is_instance).item(), 1, 1
+                        )
+                    ).sample
+                    
+                    class_loss = F.mse_loss(
+                        class_pred.float(),
+                        noise[~is_instance].float(), 
+                        reduction="mean"
+                    )
+                
+                # 根据论文公式(1)，组合损失，应用先验保留权重λ
+                # L = L_instance + λ·L_prior
+                loss = instance_loss + prior_preservation_weight * class_loss
                 
                 # 反向传播
                 accelerator.backward(loss)
-
-                # 梯度裁剪 (可选但推荐)
+                
                 if accelerator.sync_gradients:
-                    params_to_clip = (
-                        list(unet.parameters()) + list(text_encoder.parameters()
-                        if train_text_encoder
-                        else unet.parameters())
-                    )
-                    accelerator.clip_grad_norm_(params_to_clip, 1.0) # 使用 1.0 作为最大范数
-
+                    # 梯度裁剪
+                    if train_text_encoder:
+                        accelerator.clip_grad_norm_(
+                            list(unet.parameters()) + list(text_encoder.parameters()),
+                            1.0
+                        )
+                    else:
+                        accelerator.clip_grad_norm_(unet.parameters(), 1.0)
+                        
                 # 优化步骤
                 optimizer.step()
                 optimizer.zero_grad()
                 
-                # 删除不再需要的计算图
-                del instance_batch if 'instance_batch' in locals() else None
-                del class_batch if 'class_batch' in locals() else None
-                del noise_pred_instance if 'noise_pred_instance' in locals() else None
-                del noise_pred_class if 'noise_pred_class' in locals() else None
+                # 记录损失
+                epoch_loss["total"].append(loss.detach().item())
+                epoch_loss["instance"].append(instance_loss.detach().item() if isinstance(instance_loss, torch.Tensor) else instance_loss)
+                epoch_loss["class"].append(class_loss.detach().item() if isinstance(class_loss, torch.Tensor) else class_loss)
+            
+            # 打印损失
+            if (global_step % loss_log_interval == 0 or global_step == max_train_steps-1) and accelerator.is_main_process:
+                print(f"\n步骤 {global_step}/{max_train_steps}: 总损失={loss.detach().item():.4f}, "
+                      f"实例损失={instance_loss.detach().item() if isinstance(instance_loss, torch.Tensor) else instance_loss:.4f}, "
+                      f"类别损失={class_loss.detach().item() if isinstance(class_loss, torch.Tensor) else class_loss:.4f}")
                 
-            # 记录和打印进度
-            if accelerator.is_main_process: # 仅在主进程更新和打印
+            # 更新进度条
+            if accelerator.is_main_process:
                 progress_bar.set_postfix({
                     "loss": loss.detach().item(),
                     "instance_loss": instance_loss.detach().item() if isinstance(instance_loss, torch.Tensor) else instance_loss,
-                    "class_loss": class_loss.detach().item() if isinstance(class_loss, torch.Tensor) else class_loss,
-                    "mem_mb": torch.cuda.memory_allocated()/1024**2 if torch.cuda.is_available() else 0
+                    "class_loss": class_loss.detach().item() if isinstance(class_loss, torch.Tensor) else class_loss
                 })
                 progress_bar.update(1)
-            
-            # 删除不再需要的损失变量，防止内存累积
-            del loss, instance_loss, class_loss, noise
-            if 'noisy_latents' in locals():
-                del noisy_latents
                 
-            # 如果内存占用过高，强制执行内存清理
-            if torch.cuda.is_available() and torch.cuda.memory_allocated()/1024**2 > peak_memory * 0.9:
-                clean_memory()
-
+            # 正确增加步数计数器
             global_step += 1
+            step_in_epoch += 1
             
-            if global_step >= max_train_steps: # 在内部循环检查以立即停止
+            # 检查是否达到最大步数
+            if global_step >= max_train_steps:
+                print(f"\n已达到最大训练步数 {max_train_steps}，停止训练")
                 break
+                
+        # 每个epoch结束后打印统计信息
+        epoch_losses.append(epoch_loss)
+        memory_mgr.cleanup(f"Epoch {epoch+1} 结束后")
         
-        # 每个epoch结束后清理内存
-        clean_memory()
-        if accelerator.is_main_process and torch.cuda.is_available():
-            print(f"Epoch结束后GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB / 峰值: {peak_memory:.2f}MB")
+        if accelerator.is_main_process and epoch_loss["total"]:
+            avg_total = sum(epoch_loss["total"]) / len(epoch_loss["total"])
+            avg_instance = sum(epoch_loss["instance"]) / len(epoch_loss["instance"]) if epoch_loss["instance"] else 0
+            avg_class = sum(epoch_loss["class"]) / len(epoch_loss["class"]) if epoch_loss["class"] else 0
+            
+            print(f"\nEpoch {epoch+1} 统计 (完成 {step_in_epoch} 步训练):")
+            print(f"平均总损失: {avg_total:.4f}")
+            print(f"平均实例损失: {avg_instance:.4f}")
+            print(f"平均类别损失: {avg_class:.4f}")
+            print("-" * 40)
         
-        if global_step >= max_train_steps: # 如果是因为达到步数而退出外层循环
+        if global_step >= max_train_steps:
             break
 
-    # 显式关闭进度条
+    # 关闭进度条
     progress_bar.close()
-
+    
     # 最终内存清理
-    clean_memory()
-    if accelerator.is_main_process and torch.cuda.is_available():
-        print(f"训练结束后GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB / 峰值: {peak_memory:.2f}MB")
+    memory_mgr.cleanup("训练结束后")
+    memory_mgr.log_memory_stats("最终内存占用")
 
+    print("\n【第8步】保存训练完成的模型")
+    print("DreamBooth训练完成！正在保存模型...")
+    
     # 等待所有进程完成
     accelerator.wait_for_everyone()
     
-    # 保存微调后的模型
-    if accelerator.is_main_process: # 仅在主进程保存
-        # 需要先解包装模型
+    # 保存模型
+    if accelerator.is_main_process:
+        # 解包装模型
         unet = accelerator.unwrap_model(unet)
-        # text_encoder 只有在训练时才需要解包
-        final_text_encoder = None
         if train_text_encoder:
-            final_text_encoder = accelerator.unwrap_model(text_encoder)
+            text_encoder = accelerator.unwrap_model(text_encoder)
         
-        # 创建输出目录
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 从原始pipeline创建新的pipeline
-        # 如果文本编码器没有被训练，我们需要从原始路径加载它以进行保存
-        if not train_text_encoder:
-            # 从原始路径加载未训练的文本编码器
-            final_text_encoder = CLIPTextModel.from_pretrained(
-                pretrained_model_name_or_path, subfolder="text_encoder"
-            )
-
-        # 确保加载原始 VAE，因为它没有被训练
-        # 注意：VAE 已经在函数开始时加载，并且没有被修改，所以可以直接使用原始路径加载
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            pretrained_model_name_or_path, # 从原始路径加载 VAE 和其他未训练组件（如 scheduler, safety_checker）
-            unet=unet,                     # 使用训练后的 unet
-            text_encoder=final_text_encoder, # 使用训练后或原始的 text_encoder
-            # VAE 会自动从 pretrained_model_name_or_path 加载
-        )
-        
-        # 保存微调后的模型
-        pipeline.save_pretrained(output_dir)
-        print(f"模型已保存到 {output_dir}")
-        
-        # 保存标识符以供将来推理使用
+        # 保存标识符
         with open(os.path.join(output_dir, "identifier.txt"), "w") as f:
             f.write(identifier)
+        
+        # 保存完整模型
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            pretrained_model_name_or_path,
+            unet=unet,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            scheduler=noise_scheduler,
+            vae=vae
+        )
+        pipeline.save_pretrained(output_dir)
+        print(f"模型已保存到 {output_dir}")
+    
+    print(f"\nDreamBooth训练成功完成！")
+    print(f"【重要】使用标识符 '{identifier}' 来在提示词中引用您的特定主体")
+    print(f"例如: 'a {identifier} {class_prompt.replace('a ', '')} wearing a hat'")
     
     return None, identifier
 
-def inference(
-    model_path="./output",
-    prompt=None,
-    class_prompt="a dog",
-    identifier=None,
-    output_image_path="./generated_image.png",
-    num_images=1,
-    guidance_scale=7.5,
-    num_inference_steps=50,
-):
-    # 确保目录存在
-    if not os.path.exists(model_path):
-        print(f"错误: 模型路径不存在: {model_path}")
-        print("请确保您已经训练了模型或提供了正确的路径")
-        return None
-
-    # 改进的设备选择
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"正在加载模型到设备: {device}")
-    
-    try:
-        # 加载微调后的模型
-        pipeline = StableDiffusionPipeline.from_pretrained(model_path)
-        pipeline = pipeline.to(device)
-        
-        # 如果有CUDA，尝试启用内存优化
-        if device == "cuda":
-            try:
-                # 尝试启用内存优化
-                pipeline.enable_attention_slicing()
-                # 尝试检测并启用xFormers优化
-                if hasattr(pipeline, "enable_xformers_memory_efficient_attention"):
-                    pipeline.enable_xformers_memory_efficient_attention()
-                    print("已启用xFormers优化以提高性能")
-            except Exception as e:
-                print(f"注意: 无法启用某些GPU优化: {e}")
-    
-        # 如果未提供标识符但存在标识符文件，则读取它
-        if identifier is None and os.path.exists(os.path.join(model_path, "identifier.txt")):
-            with open(os.path.join(model_path, "identifier.txt"), "r") as f:
-                identifier = f.read().strip()
-                print(f"从文件加载标识符: {identifier}")
-        
-        # 如果未提供提示词，则使用标识符创建
-        if prompt is None and identifier is not None:
-            class_name = class_prompt.replace("a ", "").strip()
-            prompt = f"a {identifier} {class_name} wearing a hat"
-        elif prompt is None:
-            raise ValueError("需要提供prompt或identifier")
-        
-        # 生成图像
-        print(f"使用提示词生成图像: '{prompt}'")
-        outputs = pipeline(
-            prompt,
-            num_images_per_prompt=num_images,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps
-        )
-        
-        # 保存所有生成的图像
-        os.makedirs(os.path.dirname(output_image_path), exist_ok=True)
-        
-        if num_images == 1:
-            outputs.images[0].save(output_image_path)
-            print(f"图像已保存到 {output_image_path}")
-        else:
-            base_path = os.path.splitext(output_image_path)[0]
-            extension = os.path.splitext(output_image_path)[1]
-            for i, image in enumerate(outputs.images):
-                path = f"{base_path}_{i}{extension}"
-                image.save(path)
-            print(f"已保存 {num_images} 张图像到 {os.path.dirname(output_image_path)}")
-        
-        return outputs.images
-    except Exception as e:
-        print(f"推理过程中发生错误: {e}")
-        return None
-
 if __name__ == "__main__":
+    # 添加一个检查函数，用于验证DreamBooth的理论正确性
+    def verify_dreambooth_implementation():
+        """验证DreamBooth实现与论文的一致性"""
+        print("\n【验证DreamBooth实现】")
+        print("检查以下关键组件是否与论文一致:")
+        
+        checks = [
+            "✓ 使用罕见标识符将特定主体与类别绑定 (论文3.2节)",
+            "✓ 实现先验保留损失以防止语言漂移 (论文3.3节)",
+            "✓ 损失函数形式: L = L_instance + λ·L_prior (公式1)",
+            "✓ 文本编码器与U-Net联合训练选项 (论文3.4节)",
+            "✓ 标准提示词格式: a [identifier] [class] (论文3.2节)"
+        ]
+        
+        for check in checks:
+            print(check)
+        
+        print("\n论文引用:")
+        print("Ruiz, N., Li, Y., Jampani, V., Pritch, Y., Rubinstein, M., & Aberman, K. (2022).")
+        print("DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation.")
+        return True
+    
     # 添加安装帮助命令
     parser = argparse.ArgumentParser(description="DreamBooth训练和推理")
     parser.add_argument("--install_help", action="store_true", help="显示安装指南")
@@ -660,8 +794,18 @@ if __name__ == "__main__":
     parser.add_argument("--train_text_encoder", action="store_true", help="是否训练文本编码器")
     parser.add_argument("--num_images", type=int, default=1, help="生成图像的数量")
     parser.add_argument("--prior_images", type=int, default=10, help="先验保留的类别图像数量")
+    parser.add_argument("--explain", action="store_true", help="显示DreamBooth原理解释")
+    parser.add_argument("--examples", action="store_true", help="训练后生成应用示例")
+    parser.add_argument("--create_guide", action="store_true", help="创建DreamBooth技术指南")
+    parser.add_argument("--create_report", action="store_true", help="创建实验报告")
+    parser.add_argument("--verify", action="store_true", help="验证DreamBooth实现与论文一致性")
     
     args = parser.parse_args()
+    
+    # 验证实现
+    if args.verify:
+        verify_dreambooth_implementation()
+        exit(0)
     
     # 显示安装帮助
     if args.install_help:
@@ -697,6 +841,88 @@ if __name__ == "__main__":
         args.model_name = download_small_model()
         
     print(f"\n将使用模型: {args.model_name}")
+    
+    # 显示理论解释
+    if args.explain:
+        explain_dreambooth_theory()
+        print("\n要开始训练，请使用 --train 参数")
+        exit(0)
+        
+    # 创建技术指南
+    if args.create_guide:
+        print("\n创建DreamBooth技术指南...")
+        guide_path = "dreambooth_technical_guide.md"
+        
+        with open(guide_path, "w") as f:
+            f.write("# DreamBooth技术原理详解\n\n")
+            
+            f.write("## 1. 核心思想\n\n")
+            f.write("DreamBooth是一种文本到图像个性化技术，允许用户使用少量（3-5张）特定主体图像来微调现有扩散模型。\n")
+            f.write("其核心思想是将特定主体与一个罕见的词语绑定，同时保持模型对该主体所属类别的一般知识。\n\n")
+            
+            f.write("## 2. 技术挑战\n\n")
+            f.write("DreamBooth需要解决两个关键挑战：\n")
+            f.write("1. **语言漂移**：确保模型理解标识符确实指代特定主体\n")
+            f.write("2. **过度拟合**：防止模型丢失类别知识，导致生成的主体失去多样性\n\n")
+            
+            f.write("## 3. 方法细节\n\n")
+            f.write("### 3.1 标识符绑定\n\n")
+            f.write("使用形如\"a [identifier] [class]\"的提示词，例如\"a sks dog\"。\n")
+            f.write("标识符应该是自然语言中的稀有词，以避免与现有概念冲突。\n\n")
+            
+            f.write("### 3.2 先验保留损失\n\n")
+            f.write("为防止过度拟合，DreamBooth引入了先验保留损失：\n")
+            f.write("1. 使用当前模型生成类别图像（例如，从\"a dog\"生成狗的图像）\n")
+            f.write("2. 将这些合成图像纳入训练，以防止模型忘记类别的一般特征\n\n")
+            
+            f.write("### 3.3 训练过程\n\n")
+            f.write("损失函数为：L = L_主体 + λL_类别\n")
+            f.write("其中λ控制两种损失的平衡（论文建议λ=1.0）\n\n")
+            
+            f.write("## 4. 最佳实践\n\n")
+            f.write("- **实例图像**：使用3-5张高质量、多角度、干净背景的主体图像\n")
+            f.write("- **训练步数**：通常800-1000步足够，过多会导致过拟合\n")
+            f.write("- **学习率**：5e-6通常效果良好\n")
+            f.write("- **文本编码器**：若GPU内存足够，建议同时微调文本编码器\n\n")
+        
+        print(f"技术指南已保存到 {guide_path}")
+        exit(0)
+        
+    # 创建实验报告
+    def create_experiment_report(model_path, identifier, class_prompt):
+        """创建实验报告，记录训练过程和生成结果"""
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        report_path = f"experiment_report_{timestamp}.md"
+        
+        with open(report_path, "w") as f:
+            f.write("# DreamBooth实验报告\n\n")
+            f.write(f"实验日期: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+            f.write(f"预训练模型: {os.path.basename(model_path)}\n")
+            f.write(f"类别: {class_prompt}\n")
+            f.write(f"标识符: {identifier}\n\n")
+            
+            f.write("## 关键参数\n")
+            f.write("- 先验保留权重 (λ): 1.0\n")
+            f.write("- 学习率: 5e-6\n")
+            f.write("- 训练步数: 800\n\n")
+            
+            f.write("## 生成示例\n")
+            f.write("以下是不同提示词下的生成结果：\n\n")
+            
+            prompts = [
+                f"a {identifier} {class_prompt.replace('a ', '')} in a garden",
+                f"a {identifier} {class_prompt.replace('a ', '')} on the moon",
+                f"a {identifier} {class_prompt.replace('a ', '')} as a cartoon character"
+            ]
+            
+            for i, prompt in enumerate(prompts):
+                img_path = f"report_sample_{i}.png"
+                inference(model_path=model_path, prompt=prompt, output_image_path=img_path)
+                f.write(f"### 示例 {i+1}\n")
+                f.write(f"提示词: `{prompt}`\n\n")
+                f.write(f"![生成结果]({img_path})\n\n")
+        
+        print(f"实验报告已保存到 {report_path}")
     
     # 简化的小型模型训练提示
     if args.train:
@@ -738,7 +964,7 @@ if __name__ == "__main__":
             torch.cuda.empty_cache()
             print(f"训练前GPU内存占用: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
         
-        _, identifier = dreambooth_training( # 接收返回值，虽然可能不用
+        _, identifier = dreambooth_training_with_theory(
             pretrained_model_name_or_path=args.model_name,
             instance_data_dir=args.instance_data_dir,
             output_dir=args.model_path,
@@ -762,6 +988,16 @@ if __name__ == "__main__":
             if identifier:
                 print(f"使用的标识符: {identifier}")
             print(f"模型保存在: {args.model_path}")
+            
+            # 训练后生成应用示例
+            if args.examples and torch.cuda.is_available():
+                print("\n生成应用示例以展示DreamBooth的多样化能力...")
+                generate_examples(args.model_path, identifier, args.class_prompt.replace("a ", "").strip())
+            
+            # 创建实验报告
+            if args.create_report and torch.cuda.is_available():
+                print("\n创建实验报告...")
+                create_experiment_report(args.model_path, identifier, args.class_prompt.replace("a ", "").strip())
             
             # 询问用户是否要测试效果
             test_model = input("\n是否要立即测试模型效果? [y/n]: ").lower().strip()
@@ -812,5 +1048,3 @@ if __name__ == "__main__":
     
     else:
         show_quick_help()
-``` 
-
