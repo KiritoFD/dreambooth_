@@ -57,7 +57,7 @@ class LowMemoryConfig:
                 attention_slice_size=8,
                 train_text_encoder=True,
                 use_8bit_adam=True,
-                prior_images_small=20
+                prior_images_small=200
             )
         else:  # 大内存 (16GB+)
             return cls(

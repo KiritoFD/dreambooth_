@@ -29,14 +29,9 @@ except ImportError:
     print("未找到调试工具模块，将不会生成详细的训练日志")
 
 # 导入拆分的功能模块
-try:
-    from db_modules.training_loop import execute_training_loop
-    from db_modules.prior_generation import generate_prior_images, check_prior_images
-    from db_modules.model_saving import save_trained_model
-    MODULES_AVAILABLE = True
-except ImportError:
-    MODULES_AVAILABLE = False
-    print("未找到拆分的功能模块，将使用内置实现")
+from db_modules.training_loop import execute_training_loop
+from db_modules.prior_generation import generate_prior_images, check_prior_images
+from db_modules.model_saving import save_trained_model
 
 class DreamBoothDataset(Dataset):
     def __init__(self, instance_images_path, class_images_path, tokenizer, size=512, center_crop=True):
@@ -101,30 +96,6 @@ def find_rare_token(tokenizer, token_range=(5000, 10000)):
     print(f"已选择标识符 '{token_text}' (尝试次数: {attempts})")
     return token_text
 
-def generate_class_images(model, class_prompt, output_dir, num_samples=200):
-    # 打印先验保留理论
-    if HAS_THEORY_NOTES:
-        theory = get_theory_step("prior_preservation")
-        if theory:
-            print_theory_step("2", theory["title"], theory["description"])
-    
-    os.makedirs(output_dir, exist_ok=True)
-    model.safety_checker = None
-    
-    batch_size = 4
-    num_batches = (num_samples + batch_size - 1) // batch_size
-    
-    for batch_idx in tqdm(range(num_batches)):
-        batch_prompts = [class_prompt] * min(batch_size, num_samples - batch_idx * batch_size)
-        with torch.no_grad():
-            outputs = model(batch_prompts, num_inference_steps=50, guidance_scale=7.5)
-            
-        for i, image in enumerate(outputs.images):
-            img_idx = batch_idx * batch_size + i
-            image.save(os.path.join(output_dir, f"class_{img_idx:04d}.png"))
-    
-    return output_dir
-
 def dreambooth_training(
     pretrained_model_name_or_path,
     instance_data_dir,
@@ -145,6 +116,7 @@ def dreambooth_training(
     attention_slice_size=0,
     gradient_checkpointing=False,
     use_8bit_adam=False,
+    low_memory=False,
 ):
     """DreamBooth核心训练逻辑"""
     # 初始化调试监控器
@@ -249,17 +221,16 @@ def dreambooth_training(
     )
     pipeline.to(accelerator.device)
     
-    if MODULES_AVAILABLE:
-        class_images_dir = generate_prior_images(
-            pipeline=pipeline,
-            class_prompt=class_prompt,
-            output_dir=output_dir,
-            num_samples=prior_generation_samples,
-            theory_notes_enabled=HAS_THEORY_NOTES,
-            theory_step_fn=get_theory_step
-        )
-    else:
-        class_images_dir = generate_class_images(pipeline, class_prompt, os.path.join(output_dir, "class_images"), prior_generation_samples)
+    # 使用模块化先验图像生成
+    class_images_dir = generate_prior_images(
+        pipeline=pipeline,
+        class_prompt=class_prompt,
+        output_dir=output_dir,
+        num_samples=prior_generation_samples,
+        theory_notes_enabled=HAS_THEORY_NOTES,
+        theory_step_fn=get_theory_step,
+        batch_size=2 if low_memory else 4  # 低内存模式使用更小批次
+    )
     
     del pipeline
     if memory_mgr:
@@ -358,62 +329,79 @@ def dreambooth_training(
         print(f"发现检查点文件，但未启用恢复训练。如需恢复训练，请使用 --resume 参数")
     
     # 第7-9阶段：训练循环
-    if MODULES_AVAILABLE:
-        global_step, loss_history, training_successful = execute_training_loop(
-            accelerator=accelerator,
-            unet=unet,
-            text_encoder=text_encoder,
-            vae=vae,
-            tokenizer=tokenizer,
-            dataloader=dataloader,
-            optimizer=optimizer,
-            noise_scheduler=noise_scheduler,
-            instance_prompt=instance_prompt,
-            class_prompt=class_prompt,
-            max_train_steps=max_train_steps,
-            output_dir=output_dir,
-            prior_preservation_weight=prior_preservation_weight,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            train_text_encoder=train_text_encoder,
-            resume_from=start_step if resume_training else None,
-            memory_mgr=memory_mgr,
-            debug_monitor=debug_monitor,
-            has_theory_notes=HAS_THEORY_NOTES,
-            update_stage_fn=update_stage,
-            get_theory_step=get_theory_step
-        )
-    else:
-        # 使用内置训练循环
-        # ...existing code...
-        pass
+    global_step, loss_history, training_successful = execute_training_loop(
+        accelerator=accelerator,
+        unet=unet,
+        text_encoder=text_encoder,
+        vae=vae,
+        tokenizer=tokenizer,
+        dataloader=dataloader,
+        optimizer=optimizer,
+        noise_scheduler=noise_scheduler,
+        instance_prompt=instance_prompt,
+        class_prompt=class_prompt,
+        max_train_steps=max_train_steps,
+        output_dir=output_dir,
+        prior_preservation_weight=prior_preservation_weight,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        train_text_encoder=train_text_encoder,
+        resume_from=start_step if resume_training else None,
+        memory_mgr=memory_mgr,
+        debug_monitor=debug_monitor,
+        has_theory_notes=HAS_THEORY_NOTES,
+        update_stage_fn=update_stage,
+        get_theory_step=get_theory_step,
+        low_memory=low_memory,
+        max_grad_norm=1.0
+    )
     
     # 第10阶段：模型保存
     update_stage()
     accelerator.wait_for_everyone()
     
     if accelerator.is_main_process:
-        if MODULES_AVAILABLE:
-            pipeline = save_trained_model(
-                pretrained_model_name_or_path=pretrained_model_name_or_path,
-                output_dir=output_dir,
-                unet=accelerator.unwrap_model(unet),
-                text_encoder=accelerator.unwrap_model(text_encoder),
-                tokenizer=tokenizer,
-                noise_scheduler=noise_scheduler,
-                vae=vae,
-                identifier=identifier,
-                loss_history=loss_history if 'loss_history' in locals() else None,
-                theory_notes_enabled=HAS_THEORY_NOTES
-            )
-        else:
-            # 使用内置模型保存逻辑
-            # ...existing code...
-            pass
+        pipeline = save_trained_model(
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            output_dir=output_dir,
+            unet=accelerator.unwrap_model(unet),
+            text_encoder=accelerator.unwrap_model(text_encoder),
+            tokenizer=tokenizer,
+            noise_scheduler=noise_scheduler,
+            vae=vae,
+            identifier=identifier,
+            loss_history=loss_history,
+            theory_notes_enabled=HAS_THEORY_NOTES
+        )
         
     print(f"\nDreamBooth训练完成！使用标识符 '{identifier}' 在提示词中引用您的特定主体")
     
     # 第11阶段：应用建议
     update_stage()
-    # ...existing code for application guide...
+    if HAS_THEORY_NOTES and accelerator.is_main_process:
+        print("\n" + "="*60)
+        print("【DreamBooth应用指南】")
+        print("="*60)
+        print(f"""
+现在您已成功训练完成DreamBooth模型，可以尝试以下应用场景：
+
+1. 主体重新上下文化 (论文图1):
+   - "a {identifier} {class_prompt.replace('a ', '')} in a luxurious living room"
+   - "a {identifier} {class_prompt.replace('a ', '')} on a sandy beach"
+
+2. 视角合成 (论文图4):
+   - "a front view of {identifier} {class_prompt.replace('a ', '')}"
+   - "a side view of {identifier} {class_prompt.replace('a ', '')}"
+
+3. 风格转换 (论文图3):
+   - "a painting of {identifier} {class_prompt.replace('a ', '')} in the style of Van Gogh"
+   - "a sketch of {identifier} {class_prompt.replace('a ', '')}"
+
+4. 属性编辑 (论文图4):
+   - "a {identifier} {class_prompt.replace('a ', '')} wearing a hat"
+   - "a {identifier} {class_prompt.replace('a ', '')} made of gold"
+
+使用方式:
+python main.py --infer --model_path {output_dir} --prompt "在此处输入上述示例提示词"
+""")
     
-    return identifier
+    return identifier, training_successful
