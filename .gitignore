@@ -7,13 +7,7 @@
 *.bin
 *.onnx
 
-# 排除生成的图像目录
-/class_images/
-**/class_images/
-*.png
-*.jpg
-*.jpeg
-/test_result.png
+
 
 # 排除Hugging Face缓存
 /.cache/
