@@ -1,0 +1,60 @@
+{
+  "paths": {
+    "pretrained_model_name_or_path": "CompVis/stable-diffusion-v1-4",
+    "instance_data_dir": "assets",
+    "class_data_dir": "output/class_images",
+    "output_dir": "./output"
+  },
+  "dataset": {
+    "instance_prompt": "a sks witch",
+    "class_prompt": "a witch",
+    "resolution": 512,
+    "center_crop": true,
+    "train_batch_size": 1,
+    "dataloader_num_workers": 0
+  },
+  "training": {
+    "max_train_steps": 100000,
+    "learning_rate": 1e-4,
+    "scale_lr": false,
+    "lr_scheduler": "constant",
+    "lr_warmup_steps": 0,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_weight_decay": 1e-2,
+    "adam_epsilon": 1e-8,
+    "max_grad_norm": 1.0,
+    "gradient_accumulation_steps": 1,
+    "gradient_checkpointing": true,
+    "train_text_encoder": true,
+    "prior_preservation": true,
+    "prior_loss_weight": 1.0,
+    "num_class_images": 200,
+    "seed": null,
+    "mixed_precision": "fp16",
+    "resume_from_checkpoint": null,
+    "early_stop_threshold": 20,
+    "allow_tf32": false
+  },
+  "logging_saving": {
+    "save_steps": 500,
+    "logging_dir_suffix": "logs",
+    "report_to": "tensorboard",
+    "validation_prompt": "A photo of sks person in a new location",
+    "num_validation_images": 4,
+    "validation_steps": 100,
+    "log_every_n_steps": 10,
+    "print_status_every_n_steps": 200
+  },
+  "memory_optimization": {
+    "use_8bit_adam": true,
+    "attention_slice_size": null,
+    "xformers_optimization": true,
+    "offload_optimizer_to_cpu": false,
+    "aggressive_gc": false,
+    "low_memory_mode_execute_loop": false
+  },
+  "advanced":{
+    "monitor_loss_in_loop": true
+  }
+}

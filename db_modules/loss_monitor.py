@@ -99,10 +99,11 @@ class LossMonitor:
         if self.zero_loss_counter > 0:
             suggestions.extend([
                 "实例损失接近零，可能存在以下问题:",
-                "1. 实例图像质量问题，请检查图像是否清晰且多样化",
-                "2. 学习率可能过低，尝试增加到1e-5",
-                "3. 可能需要增加训练步数，建议至少800步",
-                "4. 尝试设置更高的实例损失权重"
+                "0. 检查训练日志中 '[compute_loss DEBUG L1] Batch instance_count' 是否持续为0。如果是，表明批次中没有实例图像，请仔细检查您的数据集 (Dataset) 类和数据加载器 (DataLoader) 配置，特别是确保 'is_instance' 标志被正确设置为 True 对您的实例图像。",
+                "1. 实例图像质量问题（如果 instance_count > 0 但损失仍为0，请检查图像是否清晰且多样化）。",
+                "2. 学习率可能过低（如果 instance_count > 0）。",
+                "3. 可能需要增加训练步数（如果 instance_count > 0）。",
+                "4. 尝试设置更高的实例损失权重（如果 instance_count > 0）。"
             ])
             
         # 检查损失不稳定的情况

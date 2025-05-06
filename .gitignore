@@ -46,6 +46,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+.env # 添加对 .env 文件的忽略
 
 # 排除IDE相关文件
 .idea/

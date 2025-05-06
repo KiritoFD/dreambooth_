@@ -1,206 +1,141 @@
 """
 DreamBooth 简化自动训练脚本
-直接执行训练，无需任何用户交互
-实现典型的DreamBooth训练流程，优先使用本地模型
+通过加载配置文件执行训练。
 """
 import os
-import sys
+# import sys # Not used directly
 import time
 import gc
 from datetime import datetime
 import torch
+import json # For loading config
+import argparse # For specifying config file
 
-# 导入main.py中的函数
-from main import dreambooth_training, download_small_model, MemoryManager
-# 导入本地模型加载模块
-from db_modules.model_loader import find_local_model, load_model_with_local_priority
+# 导入main.py中的函数 (dreambooth_training is now the primary one)
+from dreambooth import dreambooth_training 
+# from main import download_small_model, MemoryManager # Keep if needed for other logic, but training is via config
+# from db_modules.model_loader import find_local_model, load_model_with_local_priority # Model path is now in config
 
-def auto_train(iterations=100):
+def load_config(config_path): # Helper
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    return config
+
+def auto_train_entry(config_file_path, iterations=1): # iterations can be part of config too
     """
-    直接调用dreambooth_training函数执行多次训练
+    自动训练入口点，加载配置并执行训练。
     
     Args:
-        iterations: 重复执行的次数
+        config_file_path (str): 配置文件的路径。
+        iterations (int): 重复执行的次数 (如果希望多次运行相同配置)。
     """
-    # 训练参数设置 - 根据DreamBooth标准训练流程调整
-    params = {
-        # 基础训练参数
-        "instance_data_dir": "./assets",
-        "instance_prompt": "a photo of a sks container",  # 使用唯一标识符
-        "class_prompt": "a photo of a container",  # 一般类别名称
-        "output_dir": "./output",
-        "steps": 800,  # DreamBooth训练通常800-1500步
+    if not os.path.exists(config_file_path):
+        print(f"错误: 配置文件 '{config_file_path}' 不存在!")
+        return False
         
-        # 先验保留相关参数
-        "prior_preservation": True,
-        "prior_weight": 1.0,
-        "prior_images": 100,  # 典型值为100
-        
-        # 优化参数
-        "learning_rate": 5e-6,  # 典型学习率
-        "train_text_encoder": True,  # 通常为True以获得更好效果
-        "batch_size": 1,
-        "gradient_accumulation": 1,
-        
-        # 本地模型和恢复训练
-        "model_name": "CompVis/stable-diffusion-v1-4",  # 默认模型
-        "use_local_model": True,  # 优先使用本地模型
-        "custom_model_path": None,  # 自定义本地模型路径
-        "resume": True,
-        
-        # 内存优化
-        "low_memory": True,
-    }
+    config_data = load_config(config_file_path)
     
-    # 记录开始时间
-    start_time = datetime.now()
+    # iterations can also be a field in config_data if desired
+    # num_iterations = config_data.get("auto_train_iterations", iterations)
+
     print(f"\n" + "="*80)
-    print(f"DreamBooth 自动训练开始")
-    print(f"计划执行 {iterations} 次训练")
+    print(f"DreamBooth 自动训练开始 (Config-Driven)")
+    print(f"计划执行 {iterations} 次训练迭代使用配置: {config_file_path}")
+    start_time = datetime.now()
     print(f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*80)
     
-    # 检查实例图像目录是否存在
-    if not os.path.exists(params["instance_data_dir"]):
-        print(f"错误: 实例图像目录 '{params['instance_data_dir']}' 不存在!")
+    # 实例图像目录检查 (从config获取)
+    instance_dir = config_data.get("paths", {}).get("instance_data_dir", None)
+    if not instance_dir or not os.path.exists(instance_dir):
+        print(f"错误: 实例图像目录 '{instance_dir}' (来自config) 不存在或未在config中定义!")
         return False
     
-    # 确保输出目录存在
-    os.makedirs(params["output_dir"], exist_ok=True)
-    
-    # 优先使用本地模型
-    if params["use_local_model"]:
-        print("\n正在查找本地模型...")
-        
-        # 如果提供了自定义路径，首先检查该路径
-        if params["custom_model_path"] and os.path.exists(params["custom_model_path"]):
-            local_model_path = params["custom_model_path"]
-            print(f"使用指定的本地模型: {local_model_path}")
-        else:
-            # 查找本地模型
-            local_model_path = find_local_model(params["model_name"])
-            if local_model_path:
-                print(f"找到本地模型: {local_model_path}")
-                params["model_name"] = local_model_path  # 使用本地模型路径
-            else:
-                print(f"未找到本地模型 '{params['model_name']}'，将尝试下载")
-    
-    # 添加实例损失监控参数
-    params["monitor_loss"] = True
-    params["instance_loss_weight"] = 1.0  # 确保实例损失有足够的权重
-    
-    # 内存优化参数
-    if params["low_memory"]:
-        try:
-            from db_modules.memory_optimization import get_optimal_settings
-            if torch.cuda.is_available():
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                config = get_optimal_settings(gpu_memory)
-                
-                print(f"\n应用内存优化: 针对{gpu_memory:.1f}GB GPU")
-                
-                # 低内存训练参数 - 调整以避免实例损失为0
-                low_memory_params = {
-                    "attention_slice_size": config.get("attention_slice_size", 4),
-                    "gradient_checkpointing": config.get("gradient_checkpointing", True),
-                    "use_8bit_adam": config.get("use_8bit_adam", True),
-                    "mixed_precision": config.get("mixed_precision", "fp16"),
-                    "enable_xformers": config.get("enable_xformers", False),
-                    "scale_lr": True,  # 根据批次大小缩放学习率
-                }
-            else:
-                low_memory_params = {}
-        except ImportError:
-            print("未找到内存优化模块，将使用标准设置")
-            low_memory_params = {}
-    else:
-        low_memory_params = {}
-    
-    # 创建内存管理器
-    memory_mgr = MemoryManager()
-    
-    # 执行训练循环
+    # 输出目录检查 (从config获取)
+    output_dir_config = config_data.get("paths", {}).get("output_dir", "./output_auto")
+    os.makedirs(output_dir_config, exist_ok=True) # Ensure output_dir from config exists
+    config_data["paths"]["output_dir"] = output_dir_config # Ensure it's set for the training call
+
+    # memory_mgr = MemoryManager(config_data.get("memory_optimization", {}).get("aggressive_gc", False)) # dreambooth_training handles its own
+
+    all_iterations_successful = True
     for i in range(iterations):
-        # 计算进度和时间
         curr_time = datetime.now()
-        elapsed = (curr_time - start_time).total_seconds() / 60.0
-        eta = (elapsed / (i + 1)) * (iterations - i - 1) if i > 0 else 0
+        elapsed_total = (curr_time - start_time).total_seconds()
         
         print(f"\n" + "-"*80)
-        print(f"[{i+1}/{iterations}] 开始训练回合")
-        print(f"已用时: {elapsed:.1f}分钟 - 预计剩余: {eta:.1f}分钟")
+        print(f"自动训练迭代 [{i+1}/{iterations}]")
+        if i > 0:
+            avg_time_per_iter = elapsed_total / i
+            eta_seconds = avg_time_per_iter * (iterations - i)
+            eta_str = str(datetime.timedelta(seconds=int(eta_seconds)))
+            print(f"已用时: {str(datetime.timedelta(seconds=int(elapsed_total)))} - 预计剩余: {eta_str}")
         print(f"当前时间: {curr_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"使用模型: {params['model_name']}")
+        print(f"使用模型 (来自config): {config_data.get('paths', {}).get('pretrained_model_name_or_path')}")
         print("-"*80)
         
-        # 强制清理内存
+        # 强制清理内存 (dreambooth_training might do this too via MemoryManager)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
         try:
-            # 直接调用训练函数，使用更多DreamBooth特定参数
-            identifier, training_successful = dreambooth_training(
-                pretrained_model_name_or_path=params["model_name"],
-                instance_data_dir=params["instance_data_dir"],
-                output_dir=params["output_dir"],
-                instance_prompt=params["instance_prompt"],
-                class_prompt=params["class_prompt"],
-                learning_rate=params["learning_rate"],
-                max_train_steps=params["steps"],
-                prior_preservation=params["prior_preservation"],
-                prior_preservation_weight=params["prior_weight"],
-                train_text_encoder=params["train_text_encoder"],
-                prior_generation_samples=params["prior_images"],
-                train_batch_size=params["batch_size"],
-                gradient_accumulation_steps=params["gradient_accumulation"],
-                memory_mgr=memory_mgr,
-                resume_training=params["resume"],
-                use_local_models=params["use_local_model"],
-                local_model_path=local_model_path if "local_model_path" in locals() else None,
-                **low_memory_params
-            )
+            # 直接调用训练函数
+            # Note: If iterations > 1 and output_dir is the same, checkpoints will overwrite.
+            # Consider modifying output_dir per iteration if separate outputs are needed.
+            # For now, using the same config means it will try to resume or overwrite.
             
-            print(f"\n训练回合 {i+1} 完成: {'成功' if training_successful else '未成功完成'}")
+            # If each iteration should be fresh, ensure resume_from_checkpoint is null or handle output_dir
+            current_config = config_data.copy() # Use a copy if modifications per iteration are needed
+            if iterations > 1:
+                 # Example: make output_dir unique per iteration
+                 # current_config["paths"]["output_dir"] = os.path.join(output_dir_config, f"iter_{i+1}")
+                 # os.makedirs(current_config["paths"]["output_dir"], exist_ok=True)
+                 # current_config["training"]["resume_from_checkpoint"] = None # Ensure fresh start unless intended
+                 pass
+
+
+            identifier, training_successful_iter = dreambooth_training(current_config)
             
-            # 更新输出路径以包含标识符，便于后续训练
-            if training_successful and identifier:
-                params["output_dir"] = os.path.join("./output", identifier)
-                print(f"后续训练将保存到: {params['output_dir']}")
+            print(f"\n训练迭代 {i+1} 完成: {'成功' if training_successful_iter else '未成功完成'}")
+            if not training_successful_iter:
+                all_iterations_successful = False
             
         except Exception as e:
-            print(f"\n训练回合 {i+1} 出错: {str(e)}")
+            print(f"\n训练迭代 {i+1} 出错: {str(e)}")
             import traceback
             traceback.print_exc()
-            
-            # 如果是模型加载错误，尝试重新设置模型来源
-            if "load_config" in str(e) or "SSL" in str(e) or "download" in str(e):
-                print("\n检测到模型加载错误，尝试使用备用模型...")
-                
-                # 尝试使用小模型
-                try:
-                    backup_model = download_small_model()
-                    if backup_model:
-                        params["model_name"] = backup_model
-                        print(f"将使用备用模型: {backup_model}")
-                except:
-                    print("无法下载备用模型，请检查网络连接或提供本地模型路径")
+            all_iterations_successful = False
+            # Decide if to continue next iteration or stop
+            # break 
         
-        # 训练完成后短暂休息，防止系统过热
-        print(f"等待10秒后开始下一回合...")
-        time.sleep(10)
+        if i < iterations - 1:
+            print(f"等待10秒后开始下一迭代...")
+            time.sleep(10) # Prevent system overheat or API rate limits if downloading
     
-    # 总结
     end_time = datetime.now()
-    total_elapsed = (end_time - start_time).total_seconds() / 3600.0
+    total_duration = end_time - start_time
     print("\n" + "="*80)
-    print(f"自动训练完成!")
-    print(f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"所有自动训练迭代完成")
+    print(f"总用时: {str(total_duration)}")
     print(f"结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"总用时: {total_elapsed:.2f}小时")
     print("="*80)
-    
-    return True
+    return all_iterations_successful
 
 if __name__ == "__main__":
-    auto_train(iterations=100)
+    cli_parser = argparse.ArgumentParser(description="DreamBooth 自动训练脚本 (Config-Driven)")
+    cli_parser.add_argument(
+        "--config_file",
+        type=str,
+        default="config.json",
+        help="Path to the training configuration JSON file.",
+    )
+    cli_parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1, # Default to 1 iteration if not specified
+        help="Number of training iterations to run with the same config."
+    )
+    cli_args = cli_parser.parse_args()
+
+    auto_train_entry(config_file_path=cli_args.config_file, iterations=cli_args.iterations)
