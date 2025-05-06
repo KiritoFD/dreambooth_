@@ -74,6 +74,18 @@ class DreamBoothDataset(Dataset):
             print(f"[DreamBoothDataset DEBUG CRITICAL WARNING] No instance images loaded, but class images are present. All batches will lack instance data, leading to instance_loss = 0.")
         elif len(self.instance_images) == 0 and len(self.class_images) == 0:
             print(f"[DreamBoothDataset DEBUG CRITICAL WARNING] No instance OR class images loaded. Dataset is empty!")
+        
+        # 添加这个标志来跟踪最后一个返回的是哪种类型的图片
+        self.last_was_instance = False
+        
+        # 计算实例图片和类别图片的混合比例
+        total_images = len(self.instance_images) + len(self.class_images)
+        if len(self.instance_images) > 0:
+            # 至少确保实例图片占比不少于20%
+            self.min_instance_ratio = max(0.2, len(self.instance_images) / total_images)
+            print(f"[DreamBoothDataset DEBUG] 设置最小实例图片比例为: {self.min_instance_ratio:.2f}")
+        else:
+            self.min_instance_ratio = 0.0
         # ---- END DATASET DEBUG ----
 
     def _load_images(self, path):
@@ -112,20 +124,43 @@ class DreamBoothDataset(Dataset):
         return len(self.instance_images) + len(self.class_images)
 
     def __getitem__(self, idx):
-        if idx < len(self.instance_images):
+        # Debugging __getitem__ - Initial call and lengths
+        print(f"[DreamBoothDataset DEBUG] __getitem__ called with idx: {idx}")
+        print(f"[DreamBoothDataset DEBUG] len(self.instance_images): {len(self.instance_images)}")
+        print(f"[DreamBoothDataset DEBUG] len(self.class_images): {len(self.class_images)}")
+        
+        # 交替返回实例和类别图片的策略，确保实例图片得到足够训练
+        if len(self.instance_images) > 0 and (
+            self.last_was_instance == False or    # 如果上次返回的是类别图片
+            idx % 5 == 0 or                      # 或者按照一定间隔强制返回实例图片
+            random.random() < self.min_instance_ratio  # 或者随机概率返回实例图片
+        ):
+            image = self.instance_images[idx % len(self.instance_images)]
+            is_instance_current = True
+            self.last_was_instance = True
+            print(f"[DreamBoothDataset DEBUG] 强制返回实例图片，idx: {idx}, 使用实例索引: {idx % len(self.instance_images)}")
+        elif idx < len(self.instance_images):
             image = self.instance_images[idx]
-            is_instance = True
+            is_instance_current = True
+            self.last_was_instance = True
+            print(f"[DreamBoothDataset DEBUG] 正常索引返回实例图片。")
         elif idx < len(self.instance_images) + len(self.class_images):
             image = self.class_images[idx - len(self.instance_images)]
-            is_instance = False
+            is_instance_current = False
+            self.last_was_instance = False
+            print(f"[DreamBoothDataset DEBUG] 正常索引返回类别图片。")
         else:
+            # This case should ideally not be hit if __len__ is correct and DataLoader respects it.
+            print(f"[DreamBoothDataset DEBUG CRITICAL] Index {idx} is out of bounds. Dataset length: {len(self)}")
             raise IndexError(f"Index {idx} out of bounds for dataset with length {len(self)}")
+
+        print(f"[DreamBoothDataset DEBUG] Determined is_instance for idx {idx}: {is_instance_current}")
 
         image_np = np.array(image).astype(np.float32)
         image_tensor = torch.from_numpy(image_np / 127.5 - 1.0)
         image_tensor = image_tensor.permute(2, 0, 1)
         
-        return {"pixel_values": image_tensor, "is_instance": torch.tensor(is_instance, dtype=torch.bool)}
+        return {"pixel_values": image_tensor, "is_instance": torch.tensor(is_instance_current, dtype=torch.bool)}
 
 def load_config(config_path):
     import json
@@ -238,7 +273,7 @@ def dreambooth_training(config):
                 params_to_optimize,
                 lr=config["training"]["learning_rate"],
                 betas=(config["training"]["adam_beta1"], config["training"]["adam_beta2"]),
-                weight_decay=config["training"]["adam_weight_decay"],
+                weight_decay=config["training"]["adam_beta_weight_decay"],
                 eps=config["training"]["adam_epsilon"],
             )
     else:
@@ -246,7 +281,7 @@ def dreambooth_training(config):
             params_to_optimize,
             lr=config["training"]["learning_rate"],
             betas=(config["training"]["adam_beta1"], config["training"]["adam_beta2"]),
-            weight_decay=config["training"]["adam_weight_decay"],
+            weight_decay=config["training"]["adam_beta_weight_decay"],
             eps=config["training"]["adam_epsilon"],
         )
         accelerator.print("Using standard AdamW optimizer.")
@@ -290,22 +325,31 @@ def dreambooth_training(config):
         collate_fn=None, # Add custom collate_fn if needed
     )
 
+    # Determine the mixed_precision_dtype that accelerator is using for its models
+    actual_mixed_precision_dtype = torch.float32 # Default if "no" or unrecognized
+    if config["training"]["mixed_precision"] == "fp16":
+        actual_mixed_precision_dtype = torch.float16
+    elif config["training"]["mixed_precision"] == "bf16":
+        actual_mixed_precision_dtype = torch.bfloat16
+    
+    accelerator.print(f"Using mixed precision: {config['training']['mixed_precision']}, corresponding to torch.dtype: {actual_mixed_precision_dtype}")
+
     global_step, loss_history, training_successful = execute_training_loop(
         accelerator=accelerator,
-        unet=unet, # Pass potentially wrapped unet
-        text_encoder=text_encoder, # Pass potentially wrapped or manual text_encoder
+        unet=unet, 
+        text_encoder=text_encoder, 
         vae=vae,
         tokenizer=tokenizer,
         dataloader=train_dataloader,
-        optimizer=None,  # Placeholder for optimizer setup
-        noise_scheduler=None,  # Placeholder for noise scheduler setup
-        lr_scheduler=None,  # Placeholder for learning rate scheduler setup
-        config=config,
+        optimizer=optimizer,
+        noise_scheduler=lr_scheduler,
+        lr_scheduler=lr_scheduler,
+        config=config, 
         resume_step=0,
         memory_mgr=None,
         debug_monitor=None,
         loss_monitor=None,
-        mixed_precision_dtype=accelerator.mixed_precision  # This is for UNet and trained TextEncoder
+        mixed_precision_dtype=actual_mixed_precision_dtype # Pass the torch.dtype object
     )
 
     if accelerator.is_main_process:

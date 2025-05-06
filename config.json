@@ -10,11 +10,11 @@
     "class_prompt": "a witch",
     "resolution": 512,
     "center_crop": true,
-    "train_batch_size": 1,
+    "train_batch_size": 16,
     "dataloader_num_workers": 0
   },
   "training": {
-    "max_train_steps": 100000,
+    "max_train_steps": 10000,
     "learning_rate": 1e-4,
     "scale_lr": false,
     "lr_scheduler": "constant",

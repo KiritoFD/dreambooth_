@@ -17,6 +17,72 @@ def execute_training_loop(
     mixed_precision_dtype
 ):
     """执行DreamBooth核心训练循环"""
+    # 增强型参数检查和修复
+    # 检查所有潜在的参数，寻找真正的 noise_scheduler
+    potential_noise_schedulers = []
+    
+    # 检查函数参数中的对象是否符合 noise_scheduler 特征
+    for param_name, param_val in {
+        'noise_scheduler': noise_scheduler,
+        'lr_scheduler': lr_scheduler,
+        'optimizer': optimizer,
+        'unet': unet,
+        'text_encoder': text_encoder,
+        'vae': vae
+    }.items():
+        if hasattr(param_val, 'config') and hasattr(param_val.config, 'num_train_timesteps'):
+            accelerator.print(f"Found potential noise_scheduler in parameter '{param_name}'")
+            potential_noise_schedulers.append((param_name, param_val))
+    
+    # 如果找到符合特征的对象，使用第一个作为 noise_scheduler
+    if potential_noise_schedulers and not (hasattr(noise_scheduler, 'config') and hasattr(noise_scheduler.config, 'num_train_timesteps')):
+        selected_name, selected_scheduler = potential_noise_schedulers[0]
+        accelerator.print(f"Auto-fixing: Using '{selected_name}' as noise_scheduler")
+        noise_scheduler = selected_scheduler
+    
+    # 最终验证
+    if not hasattr(noise_scheduler, 'config') or not hasattr(noise_scheduler.config, 'num_train_timesteps'):
+        # 尝试通过配置文件创建一个新的 DDPMScheduler
+        try:
+            from diffusers import DDPMScheduler
+            pretrained_model_path = config["paths"]["pretrained_model_name_or_path"]
+            accelerator.print(f"尝试从 '{pretrained_model_path}' 重新加载 DDPMScheduler")
+            
+            # 尝试从预训练模型创建新的 noise_scheduler
+            try:
+                noise_scheduler = DDPMScheduler.from_pretrained(
+                    pretrained_model_path, 
+                    subfolder="scheduler"
+                )
+                accelerator.print("成功创建了新的 DDPMScheduler")
+            except Exception as load_err:
+                accelerator.print(f"加载 DDPMScheduler 失败: {load_err}")
+                
+                # 尝试创建一个默认的 DDPMScheduler
+                try:
+                    accelerator.print("尝试创建默认 DDPMScheduler")
+                    noise_scheduler = DDPMScheduler(
+                        beta_start=0.00085, 
+                        beta_end=0.012, 
+                        beta_schedule="scaled_linear", 
+                        num_train_timesteps=1000
+                    )
+                    accelerator.print("成功创建了默认 DDPMScheduler")
+                except Exception as default_err:
+                    accelerator.print(f"创建默认 DDPMScheduler 失败: {default_err}")
+                    raise TypeError(f"无法创建有效的 noise_scheduler. 请检查 dreambooth.py 中的参数传递")
+                
+        except ImportError:
+            accelerator.print("无法导入 DDPMScheduler，无法自动修复")
+            error_msg = (
+                f"CRITICAL ERROR: 找不到有效的 noise_scheduler。"
+                f"当前 'noise_scheduler' 参数类型为 {type(noise_scheduler)}，"
+                "它缺少 '.config.num_train_timesteps' 属性。"
+                "请检查 dreambooth.py 中的调用，确保正确传递了 DDPMScheduler 对象。"
+            )
+            accelerator.print(error_msg)
+            raise TypeError(error_msg)
+    
     # Extract parameters from config
     instance_prompt = config["dataset"]["instance_prompt"]
     class_prompt = config["dataset"]["class_prompt"]
@@ -37,7 +103,9 @@ def execute_training_loop(
     
     global_step = resume_step  # Initialize global_step with resume_step
         
-    if global_step >= max_train_steps:
+    if global_step > 0:
+        accelerator.print(f"从步骤 {global_step} 恢复训练。")
+    elif global_step >= max_train_steps:
         accelerator.print(f"警告: 从步骤 {global_step} 恢复训练，该步骤已达到或超过当前设置的最大训练步骤 {max_train_steps}.")
     
     progress_bar = tqdm(range(global_step, max_train_steps), 
@@ -47,18 +115,80 @@ def execute_training_loop(
         
     loss_history = {"instance": [], "class": [], "total": [], "steps": []}
     
+    # 定义 device 变量
     device = accelerator.device
+    
+    # 检查设备问题并自动修复
+    # 确保所有的主要组件都在同一个设备上
+    accelerator.print(f"检查设备一致性. 主设备: {device}")
+    components = {
+        "unet": unet,
+        "text_encoder": text_encoder,
+        "vae": vae,
+        "optimizer": optimizer
+    }
+    # 检查主要模型组件
+    for name, component in components.items():
+        if hasattr(component, "device"):
+            comp_device = component.device
+            if str(comp_device) != str(device):
+                accelerator.print(f"警告: {name} 在 {comp_device} 上，而不是主设备 {device}. 尝试修复...")
+                try:
+                    if hasattr(component, "to"):
+                        component.to(device)
+                    accelerator.print(f"已将 {name} 移至设备 {device}")
+                except Exception as e:
+                    accelerator.print(f"无法将 {name} 移至设备 {device}: {e}")
+    
+    # 检测 UNet dtype 一次性完成，而不是在每个批次中
+    unet_dtype = None
+    for param in unet.parameters():
+        unet_dtype = param.dtype
+        break  # 只需要找到第一个参数的类型
+    
+    # 如果无法获取 unet 的数据类型，就使用提供的混合精度类型
+    if unet_dtype is None:
+        unet_dtype = mixed_precision_dtype
+    
+    accelerator.print(f"检测到 UNet 使用的 dtype: {unet_dtype}, 将强制所有输入与其匹配。")
+
     instance_text_inputs = tokenizer(
         instance_prompt, padding="max_length", 
         max_length=tokenizer.model_max_length,
         truncation=True, return_tensors="pt"
     ).to(device)
     
+    # 特别检查 instance_text_inputs 的设备
+    if hasattr(instance_text_inputs, "input_ids") and hasattr(instance_text_inputs.input_ids, "device"):
+        input_device = instance_text_inputs.input_ids.device
+        if str(input_device) != str(device):
+            accelerator.print(f"警告: instance_text_inputs.input_ids 在 {input_device} 上，而不是主设备 {device}. 尝试修复...")
+            try:
+                instance_text_inputs.input_ids = instance_text_inputs.input_ids.to(device)
+                if hasattr(instance_text_inputs, "attention_mask"):
+                    instance_text_inputs.attention_mask = instance_text_inputs.attention_mask.to(device)
+                accelerator.print(f"已将 instance_text_inputs 移至设备 {device}")
+            except Exception as e:
+                accelerator.print(f"无法将 instance_text_inputs 移至设备 {device}: {e}")
+    
     class_text_inputs = tokenizer(
         class_prompt, padding="max_length",
         max_length=tokenizer.model_max_length, 
         truncation=True, return_tensors="pt"
     ).to(device) if class_prompt and prior_preservation_weight > 0 else None
+    
+    # 如果使用了类别提示，也检查 class_text_inputs
+    if class_text_inputs is not None and hasattr(class_text_inputs, "input_ids") and hasattr(class_text_inputs.input_ids, "device"):
+        input_device = class_text_inputs.input_ids.device
+        if str(input_device) != str(device):
+            accelerator.print(f"警告: class_text_inputs.input_ids 在 {input_device} 上，而不是主设备 {device}. 尝试修复...")
+            try:
+                class_text_inputs.input_ids = class_text_inputs.input_ids.to(device)
+                if hasattr(class_text_inputs, "attention_mask"):
+                    class_text_inputs.attention_mask = class_text_inputs.attention_mask.to(device)
+                accelerator.print(f"已将 class_text_inputs 移至设备 {device}")
+            except Exception as e:
+                accelerator.print(f"无法将 class_text_inputs 移至设备 {device}: {e}")
     
     params_to_optimize = list(unet.parameters())
     if train_text_encoder:
@@ -84,13 +214,42 @@ def execute_training_loop(
                         accelerator, batch, unet, vae, noise_scheduler,
                         instance_text_inputs, class_text_inputs if prior_preservation_weight > 0 else None, 
                         text_encoder, prior_preservation_weight, accelerator.device, 
-                        mixed_precision_dtype,  # Dtype for UNet and trained TextEncoder
+                        mixed_precision_dtype, unet_dtype,  # 传递 unet_dtype 而不是再次检测
                         config  # Pass config to compute_loss if it needs specific flags
                     )
                     
                     if torch.isnan(loss) or torch.isinf(loss):
                         accelerator.print("CRITICAL: Loss is NaN or Inf. Skipping step.")
                         continue
+                    
+                    # 每步实时打印损失值，而不是只在特定步骤打印
+                    if accelerator.is_main_process:
+                        # 提取损失值（如果是张量）
+                        total_loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
+                        inst_loss = instance_loss_val.item() if isinstance(instance_loss_val, torch.Tensor) else instance_loss_val
+                        class_loss = class_loss_val.item() if isinstance(class_loss_val, torch.Tensor) else class_loss_val
+                        
+                        # 构建实时损失显示
+                        loss_str = f"Step {global_step}/{max_train_steps} | Loss: {total_loss_val:.6f}"
+                        
+                        # 仅当有意义时添加实例/类别损失
+                        if inst_loss != 0:
+                            loss_str += f" | 实例损失: {inst_loss:.6f}"
+                        if class_loss != 0:
+                            loss_str += f" | 类别损失: {class_loss:.6f}"
+                            
+                        # 显示进度百分比
+                        progress_pct = (global_step / max_train_steps) * 100
+                        loss_str += f" | 进度: {progress_pct:.2f}%"
+                        
+                        # 打印当前批次的is_instance分布情况
+                        if 'is_instance' in batch:
+                            is_instance = batch['is_instance']
+                            instance_count = torch.sum(is_instance).item()
+                            class_count = is_instance.size(0) - instance_count
+                            loss_str += f" | 批次构成: {instance_count}实例/{class_count}类别"
+                        
+                        accelerator.print(loss_str)
                     
                     if accelerator.is_main_process and global_step % 10 == 0:
                         accelerator.print(f"Step {global_step}: Loss val={loss.item() if isinstance(loss, torch.Tensor) else loss}, grad_fn={loss.grad_fn if isinstance(loss, torch.Tensor) else 'N/A'}, req_grad={loss.requires_grad if isinstance(loss, torch.Tensor) else 'N/A'}")
@@ -115,7 +274,7 @@ def execute_training_loop(
                     if accelerator.is_main_process and global_step % log_every_n_steps == 0:  # Use from config
                         log_losses(
                             accelerator, loss, instance_loss_val, class_loss_val,
-                            global_step, max_train_steps, loss_history, debug_monitor, lr_scheduler  # Pass lr_scheduler for logging LR
+                            global_step, max_train_steps, loss_history, debug_monitor, lr_scheduler, optimizer  # Pass optimizer for LR access
                         )
                     
                     if global_step % print_status_every_n_steps == 0 and global_step > 0 and accelerator.is_main_process:  # Use from config
@@ -170,27 +329,66 @@ def execute_training_loop(
 def compute_loss(
     accelerator, batch, unet, vae, noise_scheduler,
     instance_text_inputs, class_text_inputs, text_encoder, 
-    prior_preservation_weight, device, weight_dtype=torch.float32,
-    config=None  # Added config for potential future use or specific flags
+    prior_preservation_weight, device, 
+    mixed_precision_dtype, unet_dtype,  # 添加 unet_dtype 作为参数
+    config=None
 ):
     """计算DreamBooth训练损失"""
     try:
-        pixel_values = batch["pixel_values"].to(device=device, dtype=weight_dtype)
+        # Add a check for the noise_scheduler type/attributes
+        if not hasattr(noise_scheduler, 'config') or not hasattr(noise_scheduler.config, 'num_train_timesteps'):
+            error_msg = (
+                f"CRITICAL ERROR: The 'noise_scheduler' object (type: {type(noise_scheduler)}) "
+                "does not have the expected '.config.num_train_timesteps' attribute. "
+                "This usually means the wrong object (e.g., a learning rate scheduler like LambdaLR) "
+                "was passed as the 'noise_scheduler' argument to 'execute_training_loop' or 'compute_loss'. "
+                "Please check the call site in 'dreambooth.py' to ensure the DDPMScheduler (or similar) "
+                "is passed as 'noise_scheduler' and the learning rate scheduler is passed as 'lr_scheduler'."
+            )
+            accelerator.print(error_msg)
+            raise TypeError(error_msg)
+
+        # Ensure mixed_precision_dtype is a torch.dtype, not a string.
+        if isinstance(mixed_precision_dtype, str):
+            accelerator.print(f"CRITICAL ERROR in compute_loss: mixed_precision_dtype is a string ('{mixed_precision_dtype}'), not a torch.dtype. This should have been converted earlier.")
+            if mixed_precision_dtype == "fp16":
+                mixed_precision_dtype = torch.float16
+            elif mixed_precision_dtype == "bf16":
+                mixed_precision_dtype = torch.bfloat16
+            else:
+                mixed_precision_dtype = torch.float32
+
+        # 采取更加一致和严格的数据类型管理
+        # 注意：设置统一的数据类型，因为模型内部可能存在混合精度的情况
+        # 将 unet 和相关输入强制为相同数据类型
+        pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32)  # VAE 始终使用 float32
         is_instance = batch["is_instance"].to(device)
         
+        # 调试: 打印 is_instance 的具体值
+        if accelerator.is_main_process:
+            accelerator.print(f"[DEBUG] is_instance values: {is_instance}")
+
         if pixel_values.shape[0] == 0:
-            return torch.tensor(0.0, device=device, dtype=weight_dtype, requires_grad=False), 0.0, 0.0
+            return torch.tensor(0.0, device=device, dtype=mixed_precision_dtype, requires_grad=False), 0.0, 0.0
         
+        # VAE 总是使用 float32
         pixel_values_for_vae = pixel_values.to(dtype=torch.float32)
         with torch.no_grad():
             latents = vae.encode(pixel_values_for_vae).latent_dist.sample()
             latents = latents * vae.config.scaling_factor
         
-        latents = latents.to(dtype=weight_dtype)
+        # 现在与 unet 的数据类型匹配
+        latents = latents.to(dtype=unet_dtype)
 
-        noise = torch.randn_like(latents)
+        noise = torch.randn_like(latents)  # 这将继承 latents 的数据类型
+        
+        # 确保时间步数据也匹配 UNet 参数的数据类型
         timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, 
-                                  (latents.shape[0],), device=latents.device).long()
+                                 (latents.shape[0],), device=latents.device).long()
+        
+        # 确保所有时间步都是长整型
+        timesteps = timesteps.long()
+        
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
         
         instance_emb = None
@@ -199,12 +397,14 @@ def compute_loss(
         if torch.any(is_instance):
             with torch.set_grad_enabled(config["training"]["train_text_encoder"]):
                 instance_emb_raw = text_encoder(instance_text_inputs.input_ids)[0]
-            instance_emb = instance_emb_raw.to(dtype=weight_dtype)
+            # 确保它与 unet 数据类型匹配
+            instance_emb = instance_emb_raw.to(dtype=unet_dtype)
 
         if class_text_inputs is not None and torch.any(~is_instance) and prior_preservation_weight > 0:
             with torch.set_grad_enabled(config["training"]["train_text_encoder"]):
                 class_emb_raw = text_encoder(class_text_inputs.input_ids)[0]
-            class_emb = class_emb_raw.to(dtype=weight_dtype)
+            # 确保它与 unet 数据类型匹配
+            class_emb = class_emb_raw.to(dtype=unet_dtype)
 
         instance_loss = 0.0
         class_loss = 0.0
@@ -213,28 +413,32 @@ def compute_loss(
         class_count = torch.sum(~is_instance).item()
 
         if instance_count > 0:
+            # 确保 timesteps 的类型是 long，而不是 UNet 期望的其他类型
             instance_pred = unet(
                 noisy_latents[is_instance],
                 timesteps[is_instance],
                 encoder_hidden_states=instance_emb.repeat(instance_count, 1, 1)
             ).sample
             
+            # MSE 损失计算应该使用 float32 以提高数值稳定性
             instance_loss_tensor = F.mse_loss(
-                instance_pred.float(),
+                instance_pred.float(),  # 转换为 float32 用于计算损失
                 noise[is_instance].float(),
                 reduction="mean"
             )
             instance_loss = instance_loss_tensor
         
         if class_count > 0:
+            # 确保所有输入到 unet 的数据都是正确的数据类型
             class_pred = unet(
-                noisy_latents[~is_instance],
-                timesteps[~is_instance],
-                encoder_hidden_states=class_emb.repeat(class_count, 1, 1)
+                noisy_latents[~is_instance].to(dtype=unet_dtype),  # 显式转换为与 unet 相同的数据类型
+                timesteps[~is_instance].long(),  # 确保时间步是长整数
+                encoder_hidden_states=class_emb.repeat(class_count, 1, 1).to(dtype=unet_dtype)  # 显式转换数据类型
             ).sample
             
+            # MSE 损失计算应该使用 float32 以提高数值稳定性
             class_loss = F.mse_loss(
-                class_pred.float(),
+                class_pred.float(),  # 转换为 float32 用于计算损失
                 noise[~is_instance].float(),
                 reduction="mean"
             )
@@ -246,19 +450,19 @@ def compute_loss(
         elif isinstance(class_loss, torch.Tensor):
             loss = prior_preservation_weight * class_loss
         else:
-            loss = torch.tensor(0.0, device=device, dtype=weight_dtype)
+            loss = torch.tensor(0.0, device=device, dtype=mixed_precision_dtype)
         
         return loss, instance_loss, class_loss
     
     except Exception as e:
         accelerator.print(f"损失计算错误: {e}")
         import traceback
-        traceback.print_exc()
-        zero_tensor = torch.tensor(0.0, device=device)
-        return zero_tensor, 0.0, 0.0
+        accelerator.print(traceback.format_exc())
+        error_loss = torch.tensor(float('inf'), device=device, dtype=torch.float32)
+        return error_loss, 0.0, 0.0
 
 
-def log_losses(accelerator, loss, instance_loss, class_loss, global_step, max_train_steps, loss_history, debug_monitor=None, lr_scheduler=None):
+def log_losses(accelerator, loss, instance_loss, class_loss, global_step, max_train_steps, loss_history, debug_monitor=None, lr_scheduler=None, optimizer=None):
     """记录训练损失"""
     il = instance_loss.item() if isinstance(instance_loss, torch.Tensor) else instance_loss
     cl = class_loss.item() if isinstance(class_loss, torch.Tensor) else class_loss
@@ -269,6 +473,10 @@ def log_losses(accelerator, loss, instance_loss, class_loss, global_step, max_tr
     loss_history["total"].append(float(tl))
     loss_history["steps"].append(global_step)
     
+    # 添加训练进度打印
+    progress = global_step / max_train_steps * 100
+    
+    # 获取当前学习率
     current_lr = "N/A"
     if lr_scheduler:
         try:
@@ -278,8 +486,9 @@ def log_losses(accelerator, loss, instance_loss, class_loss, global_step, max_tr
                 current_lr = optimizer.param_groups[0]['lr']
             except:
                 pass
-
-    if debug_monitor and accelerator.is_main_process: 
+    
+    # 继续原有的监控逻辑
+    if debug_monitor and accelerator.is_main_process:
         debug_monitor.log_step(global_step, max_train_steps, {
             "instance_loss": il,
             "class_loss": cl,
@@ -290,25 +499,8 @@ def log_losses(accelerator, loss, instance_loss, class_loss, global_step, max_tr
 
 def print_training_status(global_step, max_train_steps, loss, instance_loss, class_loss, prior_preservation_weight):
     """打印详细训练状态"""
-    il_val = instance_loss.item() if isinstance(instance_loss, torch.Tensor) else instance_loss
-    cl_val = class_loss.item() if isinstance(class_loss, torch.Tensor) else class_loss
-
-    print("\n" + "-"*60)
-    print(f"【训练进度详情 - 步骤 {global_step}/{max_train_steps}】")
-    print("-"*60)
-    print(f"""
-训练理论对应关系:
-- 实例损失对应论文公式(1)中的L_instance项
-- 类别损失对应论文公式(1)中的L_prior项
-- 总损失为: L = L_instance + {prior_preservation_weight} · L_prior
-
-训练进度: {global_step/max_train_steps*100:.1f}% 完成
-
-当前步骤损失值:
-- 实例损失: {il_val:.6f}
-- 类别损失: {cl_val:.6f}
-- 总损失: {loss.detach().item():.6f}
-""")
+    # 简化为只打印进度信息，因为损失已经实时打印
+    print(f"\n训练进度: {global_step/max_train_steps*100:.1f}% ({global_step}/{max_train_steps})")
 
 
 def save_checkpoint(accelerator, unet, text_encoder, optimizer, global_step, checkpoint_path, train_text_encoder=True):

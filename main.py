@@ -70,6 +70,17 @@ def main():
 
     if args.train:
         print(f"开始训练，所有参数从 '{args.config_file}' 加载...")
+        
+        # 调试：打印数据集路径配置
+        dataset_config = config_data.get("dataset", {})
+        instance_data_dir = dataset_config.get("instance_data_dir")
+        class_data_dir = dataset_config.get("class_data_dir")
+        print(f"[DEBUG] 从配置加载的实例图片路径: {instance_data_dir}")
+        if class_data_dir:
+            print(f"[DEBUG] 从配置加载的类别图片路径: {class_data_dir}")
+        else:
+            print("[DEBUG] 未配置类别图片路径 (如果使用了先验保留，则会自动生成或需要指定)。")
+
         identifier, training_successful = dreambooth_training(config_data)
             
         if training_successful:
