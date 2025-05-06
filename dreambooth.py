@@ -32,6 +32,7 @@ except ImportError:
 from db_modules.training_loop import execute_training_loop
 from db_modules.prior_generation import generate_prior_images, check_prior_images
 from db_modules.model_saving import save_trained_model
+from db_modules.loss_monitor import LossMonitor, verify_instance_images, adjust_training_params
 
 class DreamBoothDataset(Dataset):
     def __init__(self, instance_images_path, class_images_path, tokenizer, size=512, center_crop=True):
@@ -77,24 +78,36 @@ class DreamBoothDataset(Dataset):
         
         return {"pixel_values": image, "is_instance": is_instance}
 
-def find_rare_token(tokenizer, token_range=(5000, 10000)):
-    # 打印标识符选择理论
-    if HAS_THEORY_NOTES:
-        theory = get_theory_step("initialization")
-        if theory:
-            print_theory_step("1", theory["title"], theory["description"])
-    
-    token_id = random.randint(token_range[0], token_range[1])
-    token_text = tokenizer.decode([token_id]).strip()
-    attempts = 1
-    
-    while len(token_text) > 3 or ' ' in token_text:
-        token_id = random.randint(token_range[0], token_range[1])
-        token_text = tokenizer.decode([token_id]).strip()
-        attempts += 1
-    
-    print(f"已选择标识符 '{token_text}' (尝试次数: {attempts})")
-    return token_text
+def find_rare_token(tokenizer):
+    """找到一个稀有的token用于训练，并处理可能的错误"""
+    try:
+        # 导入安全token处理模块
+        from db_modules.tokenizer_fix import find_safe_rare_token, patch_tokenizer
+        
+        # 应用tokenizer补丁
+        tokenizer = patch_tokenizer(tokenizer)
+        
+        # 使用安全方法获取token
+        return find_safe_rare_token(tokenizer)
+    except ImportError:
+        # 如果模块不可用，回退到基本的安全方法
+        print("警告: tokenizer_fix模块不可用，使用基本方法")
+        
+        # 使用一些已知安全的token
+        safe_tokens = ["sks", "xzs", "zxq", "vxz", "person"]
+        
+        for token in safe_tokens:
+            try:
+                # 尝试基本的验证
+                token_ids = tokenizer.encode(token, add_special_tokens=False)
+                decoded = tokenizer.decode(token_ids)
+                if decoded and isinstance(decoded, str):
+                    return token
+            except:
+                continue
+                
+        # 最后的后备方案
+        return "person"
 
 def dreambooth_training(
     pretrained_model_name_or_path,
@@ -103,7 +116,7 @@ def dreambooth_training(
     class_prompt,
     instance_prompt=None,
     learning_rate=5e-6,
-    max_train_steps=1000,
+    max_train_steps=10000,
     prior_preservation_weight=1.0,
     prior_generation_samples=200,
     gradient_accumulation_steps=1,
@@ -117,6 +130,8 @@ def dreambooth_training(
     gradient_checkpointing=False,
     use_8bit_adam=False,
     low_memory=False,
+    monitor_loss=True,
+    force_continue=False,
 ):
     """DreamBooth核心训练逻辑"""
     # 初始化调试监控器
@@ -167,6 +182,20 @@ def dreambooth_training(
     # 创建必要的目录
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "class_images"), exist_ok=True)
+    
+    # 验证实例图像
+    valid_count, issues = verify_instance_images(instance_data_dir)
+    if issues:
+        print("⚠️ 实例图像检查发现以下问题:")
+        for issue in issues:
+            print(f"  - {issue}")
+    if valid_count == 0:
+        print("❌ 严重错误: 没有有效的实例图像，训练将失败!")
+        if not force_continue:
+            return None, False
+    
+    # 初始化损失监控器
+    loss_monitor = LossMonitor(threshold=1e-5)
     
     # 第2阶段：模型加载
     update_stage()
@@ -352,7 +381,9 @@ def dreambooth_training(
         update_stage_fn=update_stage,
         get_theory_step=get_theory_step,
         low_memory=low_memory,
-        max_grad_norm=1.0
+        max_grad_norm=1.0,
+        monitor_loss=monitor_loss,
+        loss_monitor=loss_monitor,
     )
     
     # 第10阶段：模型保存

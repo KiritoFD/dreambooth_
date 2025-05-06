@@ -41,7 +41,7 @@ def inference(model_path, prompt, num_images=1, output_image_path=None):
     # 加载标识符
     identifier = None
     if os.path.exists(os.path.join(model_path, "identifier.txt")):
-        with open(os.path.join(model_path, "identifier.txt"), "r") as f:
+        with open(os.path.join(model_path, "identifier.txt")) as f:
             identifier = f.read().strip()
     
     # 加载模型
@@ -77,6 +77,7 @@ def check_dependencies():
     """检查必要的依赖项是否已安装"""
     missing_deps = []
     optional_missing = []
+    version_issues = []
     
     # 检查核心依赖
     try:
@@ -91,9 +92,13 @@ def check_dependencies():
         
     try:
         import transformers
+        # 检查transformers版本 - 某些版本可能存在tokenizer问题
+        transformers_version = getattr(transformers, '__version__', '0.0.0')
+        if transformers_version < '4.20.0':
+            version_issues.append(f"transformers=={transformers_version} (建议 >= 4.20.0)")
     except ImportError:
         missing_deps.append("transformers")
-        
+    
     try:
         import diffusers
     except ImportError:
@@ -109,9 +114,21 @@ def check_dependencies():
         import xformers
     except ImportError:
         optional_missing.append("xformers")
+        
+    # 检查tokenizer相关依赖
+    try:
+        from transformers import CLIPTokenizer
+    except ImportError:
+        optional_missing.append("transformers[tokenizers]")
+    
+    if version_issues:
+        print("\n检测到潜在的版本兼容性问题:")
+        for issue in version_issues:
+            print(f"- {issue}")
+        print("建议运行: pip install --upgrade transformers")
     
     if optional_missing:
-        print("\n以下可选依赖未安装，但可以帮助降低内存使用:")
+        print("\n以下可选依赖未安装，但可以帮助降低内存使用或提高兼容性:")
         print(f"pip install {' '.join(optional_missing)}")
     
     return missing_deps

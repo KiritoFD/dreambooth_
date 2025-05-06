@@ -2,7 +2,7 @@
 DreamBooth训练模块化组件
 包含训练、内存优化和调试工具
 """
-# 确保子模块可以被正确导入
+# 确保模块可以被正确导入
 
 try:
     from .memory_optimization import (

@@ -9,7 +9,8 @@ from tqdm.auto import tqdm
 
 def generate_prior_images(
     pipeline, class_prompt, output_dir, num_samples=200,
-    batch_size=None, theory_notes_enabled=False, theory_step_fn=None
+    batch_size=None, theory_notes_enabled=False, theory_step_fn=None,
+    use_local_models=False, local_model_path=None
 ):
     """生成类别先验图像"""
     # 打印先验保留理论
@@ -26,7 +27,7 @@ def generate_prior_images(
     # 检查现有图像
     existing_images = len([f for f in os.listdir(class_images_dir) 
                          if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-    if existing_images >= num_samples:
+    if existing_images >= 1:
         print(f"\n在'{class_images_dir}'目录中找到{existing_images}张现有类别图像，跳过生成步骤")
         return class_images_dir
     
@@ -48,19 +49,43 @@ def generate_prior_images(
         else:
             batch_size = 1
     
-    num_batches = (num_samples + batch_size - 1) // batch_size
+    # 添加错误处理
+    try:
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        # 如果使用本地模型，确保已正确加载
+        if use_local_models and local_model_path and hasattr(pipeline, 'model_path'):
+            print(f"使用本地模型路径: {pipeline.model_path}")
+        
+        # 批量生成图像
+        for batch_idx in tqdm(range(num_batches), desc="生成类别图像"):
+            batch_prompts = [class_prompt] * min(batch_size, num_samples - batch_idx * batch_size)
+            with torch.no_grad():
+                outputs = pipeline(batch_prompts, num_inference_steps=50, guidance_scale=7.5)
+                
+            for i, image in enumerate(outputs.images):
+                img_idx = batch_idx * batch_size + i
+                image.save(os.path.join(class_images_dir, f"class_{img_idx:04d}.png"))
+        
+        print(f"成功生成了 {num_samples} 张类别图像，已保存到 {class_images_dir}")
+    except Exception as e:
+        print(f"生成类别图像时出错: {str(e)}")
+        print("尝试使用备用方法或减少生成数量...")
+        
+        # 如果目录为空，至少生成一些示例图像以防止训练失败
+        if len(os.listdir(class_images_dir)) == 0:
+            try:
+                # 尝试使用降低的参数重新生成
+                reduced_samples = min(20, num_samples)
+                print(f"尝试生成较少的 {reduced_samples} 张图像...")
+                outputs = pipeline([class_prompt] * reduced_samples, num_inference_steps=30, guidance_scale=7.0)
+                for i, image in enumerate(outputs.images):
+                    image.save(os.path.join(class_images_dir, f"class_{i:04d}.png"))
+                print(f"成功生成了 {reduced_samples} 张类别图像")
+            except Exception as inner_e:
+                print(f"备用方法也失败: {str(inner_e)}")
+                print("警告: 无法生成类别图像，先验保留功能可能无法正常工作")
     
-    # 批量生成图像
-    for batch_idx in tqdm(range(num_batches), desc="生成类别图像"):
-        batch_prompts = [class_prompt] * min(batch_size, num_samples - batch_idx * batch_size)
-        with torch.no_grad():
-            outputs = pipeline(batch_prompts, num_inference_steps=50, guidance_scale=7.5)
-            
-        for i, image in enumerate(outputs.images):
-            img_idx = batch_idx * batch_size + i
-            image.save(os.path.join(class_images_dir, f"class_{img_idx:04d}.png"))
-    
-    print(f"成功生成了 {num_samples} 张类别图像，已保存到 {class_images_dir}")
     return class_images_dir
 
 

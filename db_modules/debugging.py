@@ -314,7 +314,7 @@ def print_memory_optimization_suggestions(available_memory):
         print("1. 启用低内存模式: --low_memory")
         print("2. 禁用文本编码器训练 (不要使用--train_text_encoder)")
         print("3. 使用适度的先验图像数量: --prior_images 10")
-        print("4. 使用默认训练步数: --steps 1000")
+        print("4. 使用默认训练步数: --steps 10000")
     elif available_memory < 12:
         print("\n【中等内存优化建议 (8-12GB)】")
         print("1. 启用低内存模式: --low_memory")
