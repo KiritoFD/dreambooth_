@@ -206,6 +206,7 @@ def plot_loss_curves(loss_history, output_dir, prefix=""):
     plt.title('DreamBooth 训练损失', fontsize=16)
     plt.xlabel('训练步骤', fontsize=14)
     plt.ylabel('损失值', fontsize=14)
+    plt.ylabel('损失值', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend(fontsize=12)
     
@@ -239,14 +240,100 @@ def plot_loss_curves(loss_history, output_dir, prefix=""):
             ])
     print(f"损失数据已保存至: {csv_path}")
 
+def load_loss_history(csv_path):
+    """
+    从CSV文件加载损失历史。
+    
+    Args:
+        csv_path (str): CSV文件路径。
+
+    Returns:
+        dict: 包含'instance', 'class', 'total', 'steps'键的字典。
+    """
+    import csv
+    loss_history = {"steps": [], "total": [], "instance": [], "class": []}
+    if not os.path.exists(csv_path):
+        return loss_history
+
+    with open(csv_path, 'r') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            loss_history["steps"].append(int(row["Step"]))
+            loss_history["total"].append(float(row["Total Loss"]))
+            loss_history["instance"].append(float(row["Instance Loss"]))
+            loss_history["class"].append(float(row["Class Loss"]))
+    return loss_history
+
+def append_loss_to_csv(csv_path, step, total_loss, instance_loss, class_loss):
+    """
+    将损失值追加到CSV文件。
+
+    Args:
+        csv_path (str): CSV文件路径。
+        step (int): 当前训练步骤。
+        total_loss (float): 总损失。
+        instance_loss (float): 实例损失。
+        class_loss (float): 类别损失。
+    """
+    import csv
+    file_exists = os.path.isfile(csv_path)
+    with open(csv_path, 'a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(['Step', 'Total Loss', 'Instance Loss', 'Class Loss'])
+        writer.writerow([step, total_loss, instance_loss, class_loss])
+
 def dreambooth_training(config):
     """DreamBooth核心训练逻辑"""
-    accelerator = Accelerator(
-        gradient_accumulation_steps=config["training"]["gradient_accumulation_steps"],
-        mixed_precision=config["training"]["mixed_precision"],
-        log_with=config["logging_saving"]["report_to"],
-    )
 
+    # 在创建 Accelerator 之前，确保日志目录正确设置
+    # 检查当前 Accelerator 版本是否支持 logging_dir 参数
+    accelerator_kwargs = {
+        "gradient_accumulation_steps": config["training"]["gradient_accumulation_steps"],
+        "mixed_precision": config["training"]["mixed_precision"],
+    }
+    
+    # 设置 TensorBoard 的日志目录（如果需要）
+    if config["logging_saving"].get("report_to") == "tensorboard":
+        # 获取日志目录
+        logging_dir = config["logging_saving"].get("logging_dir")
+        if not logging_dir:
+            logging_dir = os.path.join(config["paths"]["output_dir"], "logs")
+            print(f"自动设置 logging_dir 为 '{logging_dir}'")
+            
+        # 确保日志目录存在
+        os.makedirs(logging_dir, exist_ok=True)
+        
+        # 设置环境变量，让 TensorBoard 知道在哪里保存日志
+        os.environ["TENSORBOARD_LOGDIR"] = logging_dir
+        
+        # 添加 log_with 参数
+        accelerator_kwargs["log_with"] = config["logging_saving"]["report_to"]
+        
+        # 直接添加 logging_dir 参数
+        accelerator_kwargs["logging_dir"] = logging_dir
+    
+    # 创建 Accelerator 实例
+    try:
+        accelerator = Accelerator(**accelerator_kwargs)
+        print(f"成功创建 Accelerator，参数: {accelerator_kwargs}")
+    except TypeError as e:
+        print(f"创建 Accelerator 时出现错误：{e}")
+        print("尝试使用兼容的参数重新创建...")
+        
+        # 移除可能不兼容的参数
+        if "log_with" in accelerator_kwargs:
+            del accelerator_kwargs["log_with"]
+            print("删除了 log_with 参数")
+        
+        # 确保没有使用 TensorBoard 时，不传递 logging_dir 参数
+        if "logging_dir" in accelerator_kwargs:
+            del accelerator_kwargs["logging_dir"]
+            print("删除了 logging_dir 参数")
+        
+        accelerator = Accelerator(**accelerator_kwargs)
+        print(f"成功使用兼容参数创建 Accelerator: {accelerator_kwargs}")
+    
     if config["training"]["seed"] is not None:
         torch.manual_seed(config["training"]["seed"])
         random.seed(config["training"]["seed"])
@@ -406,6 +493,84 @@ def dreambooth_training(config):
     
     accelerator.print(f"Using mixed precision: {config['training']['mixed_precision']}, corresponding to torch.dtype: {actual_mixed_precision_dtype}")
 
+    # 加载损失历史
+    loss_csv_path = os.path.join(config["paths"]["output_dir"], "loss_data.csv")
+    loss_history = load_loss_history(loss_csv_path)
+    
+    # 确保输出目录存在
+    os.makedirs(config["paths"]["output_dir"], exist_ok=True)
+    
+    # 改进的断点重训逻辑
+    checkpoint_path = os.path.join(config["paths"]["output_dir"], "interrupt_checkpoint.pt")
+    resume_step = 0
+    
+    # 先检查是否有之前的训练损失记录
+    if loss_history["steps"]:
+        last_recorded_step = loss_history["steps"][-1]
+        print(f"找到之前的训练记录，最后记录的步骤为: {last_recorded_step}")
+        resume_step = last_recorded_step + 1
+    
+    # 检查checkpoint文件是否存在
+    if os.path.exists(checkpoint_path):
+        print(f"找到断点重训检查点: {checkpoint_path}")
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            checkpoint_step = checkpoint.get("global_step", 0)
+            
+            # 如果检查点步骤大于loss记录的步骤，则使用检查点步骤
+            if checkpoint_step > resume_step:
+                resume_step = checkpoint_step
+                print(f"基于检查点文件更新恢复步骤为: {resume_step}")
+                
+                # 加载优化器状态
+                if "optimizer" in checkpoint:
+                    optimizer.load_state_dict(checkpoint["optimizer"])
+                    print("成功加载优化器状态")
+                
+                # 加载UNet权重
+                if "unet" in checkpoint:
+                    unet.load_state_dict(checkpoint["unet"])
+                    print("成功加载UNet权重")
+                
+                # 如果需要，加载文本编码器权重
+                if config["training"]["train_text_encoder"] and "text_encoder" in checkpoint:
+                    text_encoder.load_state_dict(checkpoint["text_encoder"])
+                    print("成功加载Text Encoder权重")
+            else:
+                print(f"检查点步骤({checkpoint_step})不大于当前记录的损失步骤({resume_step-1})，使用损失历史的恢复点")
+        except Exception as e:
+            print(f"加载检查点时出错: {e}")
+            print("将从头开始训练或使用损失记录的最后步骤")
+    
+    # 检查resume_from_checkpoint配置
+    if config["training"].get("resume_from_checkpoint"):
+        custom_checkpoint = config["training"]["resume_from_checkpoint"]
+        if os.path.exists(custom_checkpoint):
+            print(f"使用自定义检查点: {custom_checkpoint}")
+            try:
+                checkpoint = torch.load(custom_checkpoint, map_location="cpu")
+                checkpoint_step = checkpoint.get("global_step", 0)
+                resume_step = checkpoint_step
+                
+                # 加载模型和优化器状态
+                if "optimizer" in checkpoint:
+                    optimizer.load_state_dict(checkpoint["optimizer"])
+                if "unet" in checkpoint:
+                    unet.load_state_dict(checkpoint["unet"])
+                if config["training"]["train_text_encoder"] and "text_encoder" in checkpoint:
+                    text_encoder.load_state_dict(checkpoint["text_encoder"])
+                
+                print(f"成功从自定义检查点恢复训练，步骤: {resume_step}")
+            except Exception as e:
+                print(f"加载自定义检查点时出错: {e}")
+    
+    print(f"最终确定的恢复训练步骤: {resume_step}")
+    
+    # 如果步骤大于等于最大步数，提醒用户
+    if resume_step >= config["training"]["max_train_steps"]:
+        print(f"警告: 恢复步骤({resume_step})已达到或超过最大训练步骤({config['training']['max_train_steps']})。")
+        print("您可能需要增加max_train_steps或从头开始训练。")
+    
     global_step, loss_history, training_successful = execute_training_loop(
         accelerator=accelerator,
         unet=unet, 
@@ -417,11 +582,12 @@ def dreambooth_training(config):
         noise_scheduler=lr_scheduler,
         lr_scheduler=lr_scheduler,
         config=config, 
-        resume_step=0,
+        resume_step=resume_step,  # 传递正确的恢复步骤
         memory_mgr=None,
         debug_monitor=None,
         loss_monitor=None,
-        mixed_precision_dtype=actual_mixed_precision_dtype # Pass the torch.dtype object
+        mixed_precision_dtype=actual_mixed_precision_dtype,
+        loss_csv_path=loss_csv_path  # 传递CSV路径
     )
 
     if accelerator.is_main_process:

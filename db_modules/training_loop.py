@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 import os
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+import csv
 
 
 def execute_training_loop(
@@ -16,9 +17,22 @@ def execute_training_loop(
     config,  # Pass the entire config object
     resume_step,  # Explicitly pass the step to resume from
     memory_mgr, debug_monitor, loss_monitor,
-    mixed_precision_dtype
+    mixed_precision_dtype,
+    loss_csv_path  # 添加loss_csv_path参数
 ):
     """执行DreamBooth核心训练循环"""
+    
+    # 检查TensorBoard日志配置
+    if "report_to" in config["logging_saving"] and "tensorboard" in config["logging_saving"]["report_to"]:
+        if "logging_dir" not in config["logging_saving"]:
+            error_msg = (
+                "配置错误: 使用TensorBoard日志需要设置logging_dir参数。\n"
+                "请在config.json的logging_saving部分添加logging_dir字段，如:\n"
+                '"logging_dir": "./logs"'
+            )
+            accelerator.print(error_msg)
+            raise ValueError(error_msg)
+    
     # 增强型参数检查和修复
     # 检查所有潜在的参数，寻找真正的 noise_scheduler
     potential_noise_schedulers = []
@@ -85,6 +99,37 @@ def execute_training_loop(
             accelerator.print(error_msg)
             raise TypeError(error_msg)
     
+    # 确保loss_csv_path的目录存在
+    os.makedirs(os.path.dirname(os.path.abspath(loss_csv_path)), exist_ok=True)
+    
+    # 初始化global_step和loss_history
+    global_step = resume_step
+    
+    # 检查现有的loss历史文件
+    if os.path.exists(loss_csv_path) and global_step > 0:
+        # 加载现有的loss历史
+        loss_history = {"instance": [], "class": [], "total": [], "steps": []}
+        with open(loss_csv_path, 'r') as f:
+            import csv
+            reader = csv.DictReader(f)
+            for row in reader:
+                step = int(row["Step"])
+                if step < global_step:  # 只加载到恢复点之前的记录
+                    loss_history["steps"].append(step)
+                    loss_history["total"].append(float(row["Total Loss"]))
+                    loss_history["instance"].append(float(row["Instance Loss"]))
+                    loss_history["class"].append(float(row["Class Loss"]))
+        accelerator.print(f"已加载{len(loss_history['steps'])}条历史损失记录")
+    else:
+        # 如果文件不存在或从头开始，初始化空的loss历史
+        loss_history = {"instance": [], "class": [], "total": [], "steps": []}
+        
+        # 创建新的CSV文件并写入表头
+        with open(loss_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Step', 'Total Loss', 'Instance Loss', 'Class Loss'])
+        accelerator.print(f"创建了新的损失记录文件: {loss_csv_path}")
+    
     # Extract parameters from config
     instance_prompt = config["dataset"]["instance_prompt"]
     class_prompt = config["dataset"]["class_prompt"]
@@ -103,8 +148,6 @@ def execute_training_loop(
         starting_gpu_memory = torch.cuda.memory_allocated() / 1024**3
         accelerator.print(f"开始训练循环前GPU内存占用: {starting_gpu_memory:.2f} GB")
     
-    global_step = resume_step  # Initialize global_step with resume_step
-        
     if global_step > 0:
         accelerator.print(f"从步骤 {global_step} 恢复训练。")
     elif global_step >= max_train_steps:
@@ -115,8 +158,6 @@ def execute_training_loop(
                         disable=not accelerator.is_local_main_process,
                         desc="训练进度")
         
-    loss_history = {"instance": [], "class": [], "total": [], "steps": []}
-    
     # 定义 device 变量
     device = accelerator.device
     
@@ -291,6 +332,16 @@ def execute_training_loop(
                     
                     optimizer.step()
                     optimizer.zero_grad()
+                
+                # 保存损失值到CSV文件
+                if accelerator.is_main_process:
+                    append_loss_to_csv(
+                        loss_csv_path,
+                        step=global_step,
+                        total_loss=loss.item() if isinstance(loss, torch.Tensor) else loss,
+                        instance_loss=instance_loss_val.item() if isinstance(instance_loss_val, torch.Tensor) else instance_loss_val,
+                        class_loss=class_loss_val.item() if isinstance(class_loss_val, torch.Tensor) else class_loss_val
+                    )
                 
                 # 每隔一定步数更新损失曲线
                 if accelerator.is_main_process and global_step % 50 == 0 and global_step > 0:
@@ -627,3 +678,23 @@ def update_loss_plot(loss_history, output_dir, global_step, max_train_steps):
         
     except Exception as e:
         print(f"绘制损失曲线时出错: {str(e)}")
+
+
+def append_loss_to_csv(csv_path, step, total_loss, instance_loss, class_loss):
+    """将损失值追加到CSV文件"""
+    try:
+        # 确保目录存在
+        os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
+        
+        file_exists = os.path.isfile(csv_path)
+        with open(csv_path, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            if not file_exists:
+                writer.writerow(["Step", "Total Loss", "Instance Loss", "Class Loss"])
+            writer.writerow([step, total_loss, instance_loss, class_loss])
+            
+        # 确保数据立即写入磁盘
+        file.flush()
+        os.fsync(file.fileno())
+    except Exception as e:
+        print(f"写入损失值到CSV时出错: {e}")

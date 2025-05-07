@@ -10,7 +10,7 @@
     "class_prompt": "a witch",
     "resolution": 512,
     "center_crop": true,
-    "train_batch_size": 16,
+    "train_batch_size": 8,
     "dataloader_num_workers": 0
   },
   "training": {
@@ -38,6 +38,7 @@
   },
   "logging_saving": {
     "save_steps": 500,
+    "logging_dir": "./logs",
     "logging_dir_suffix": "logs",
     "report_to": "tensorboard",
     "validation_prompt": "A photo of sks person in a new location",
