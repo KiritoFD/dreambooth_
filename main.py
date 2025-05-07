@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--train", action="store_true", help="执行训练模式 (参数来自config_file)")
     parser.add_argument("--infer", action="store_true", help="执行推理模式 (参数来自config_file or specific args)")
     parser.add_argument("--prompt", type=str, help="[推理模式] 推理时的提示词 (可覆盖config中的validation_prompt)")
+    parser.add_argument("--num_images", type=int, default=1, help="[推理模式] 生成图像数量")
+    parser.add_argument("--seed", type=int, help="[推理模式] 随机种子，用于可复现结果")
 
     args = parser.parse_args()
 
@@ -100,8 +102,34 @@ def main():
         print(f"将使用模型目录: {output_model_path}")
         print(f"提示词: {infer_prompt}")
         
-        print("推理功能需要您实现 `inference` 函数的调用，并确保它能从指定路径加载模型。")
-        print("例如: from diffusers import StableDiffusionPipeline; pipeline = StableDiffusionPipeline.from_pretrained(output_model_path); image = pipeline(infer_prompt).images[0]; image.save('inference_result.png')")
+        # 调用推理功能
+        try:
+            from inference import perform_inference
+            
+            num_images = args.num_images
+            seed = args.seed
+            
+            image_paths = perform_inference(
+                model_dir=output_model_path,
+                prompt=infer_prompt,
+                num_images=num_images,
+                seed=seed
+            )
+            
+            if image_paths:
+                print(f"\n推理完成！")
+                print(f"生成了 {len(image_paths)} 张图像，保存在: {os.path.dirname(image_paths[0])}")
+            else:
+                print(f"\n推理失败，未生成图像。请查看上方错误信息。")
+            
+        except ImportError:
+            print("错误: 未能导入推理模块。请确保 'inference.py' 文件存在。")
+            return 1
+        except Exception as e:
+            print(f"执行推理时发生错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return 1
 
     else:
         print("请指定操作模式: --train 或 --infer")

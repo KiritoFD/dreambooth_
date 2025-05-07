@@ -6,6 +6,8 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 import os
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 def execute_training_loop(
@@ -290,6 +292,10 @@ def execute_training_loop(
                     optimizer.step()
                     optimizer.zero_grad()
                 
+                # 每隔一定步数更新损失曲线
+                if accelerator.is_main_process and global_step % 50 == 0 and global_step > 0:
+                    update_loss_plot(loss_history, output_dir, global_step, max_train_steps)
+                
                 if accelerator.is_main_process:
                     if global_step % save_steps == 0 and global_step > 0:  # Use save_steps from config
                         save_checkpoint(
@@ -303,13 +309,44 @@ def execute_training_loop(
                 if global_step >= max_train_steps:
                     break
         
+        # 训练结束后生成最终的损失曲线
+        if accelerator.is_main_process:
+            update_loss_plot(loss_history, output_dir, global_step, max_train_steps)
+        
+        # 训练成功完成
         training_successful = True
+        if accelerator.is_main_process:
+            # 打印最终的训练统计信息
+            if torch.cuda.is_available():
+                final_gpu_memory = torch.cuda.memory_allocated() / 1024**3
+                max_gpu_memory = torch.cuda.max_memory_allocated() / 1024**3
+                accelerator.print(f"\n训练完成统计:\n"
+                                  f"- 最终GPU内存占用: {final_gpu_memory:.2f} GB\n"
+                                  f"- 训练过程中最大内存占用: {max_gpu_memory:.2f} GB\n"
+                                  f"- 完成步数: {global_step}/{max_train_steps}\n"
+                                  f"- 实例损失最终值: {loss_history['instance'][-1] if loss_history['instance'] else 'N/A'}\n"
+                                  f"- 类别损失最终值: {loss_history['class'][-1] if loss_history['class'] else 'N/A'}")
+            
+            # 保存最终检查点
+            save_checkpoint(
+                accelerator, unet, text_encoder, optimizer,
+                global_step, os.path.join(output_dir, "final_checkpoint.pt"), train_text_encoder
+            )
         
     except KeyboardInterrupt:
         accelerator.print("\n训练被用户中断")
         handle_training_interruption(
             accelerator, unet, text_encoder, optimizer, 
             global_step, output_dir, train_text_encoder, "interrupt"
+        )
+        training_successful = False
+        
+    except torch.cuda.OutOfMemoryError as oom_error:
+        accelerator.print(f"\n训练因GPU内存不足而中断: {str(oom_error)}")
+        accelerator.print("建议: 减小批量大小、使用更小的模型或启用梯度检查点")
+        handle_training_interruption(
+            accelerator, unet, text_encoder, optimizer, 
+            global_step, output_dir, train_text_encoder, "oom_error"
         )
         training_successful = False
         
@@ -322,6 +359,17 @@ def execute_training_loop(
             global_step, output_dir, train_text_encoder, "error"
         )
         training_successful = False
+    
+    accelerator.print(f"\n训练{'成功' if training_successful else '未成功'}完成，总步数: {global_step}/{max_train_steps}")
+    
+    # 如果训练步骤太少，添加警告
+    if global_step < max_train_steps * 0.01:  # 如果完成的步骤少于1%
+        accelerator.print("\n⚠️ 警告: 训练步骤数过少，可能未能有效训练模型")
+        accelerator.print("可能的原因:")
+        accelerator.print("  - GPU内存不足")
+        accelerator.print("  - 训练速度过慢（每步耗时过长）")
+        accelerator.print("  - 数据集问题（实例图片太少或加载问题）")
+        accelerator.print("  - 手动中断训练")
     
     return global_step, loss_history, training_successful
 
@@ -539,3 +587,43 @@ def handle_training_interruption(accelerator, unet, text_encoder, optimizer, glo
             accelerator.print(f"保存{reason}检查点失败")
     
     return False
+
+
+# 添加动态绘制损失曲线的函数
+def update_loss_plot(loss_history, output_dir, global_step, max_train_steps):
+    """实时更新损失曲线并保存"""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import MaxNLocator
+        
+        # 如果数据点少于2，无法绘图
+        if len(loss_history["steps"]) < 2:
+            return
+            
+        # 创建图表
+        plt.figure(figsize=(10, 6))
+        
+        # 绘制各类损失曲线
+        plt.plot(loss_history["steps"], loss_history["total"], 'b-', label='总损失')
+        if any(x != 0 for x in loss_history["instance"]):
+            plt.plot(loss_history["steps"], loss_history["instance"], 'g-', label='实例损失')
+        if any(x != 0 for x in loss_history["class"]):
+            plt.plot(loss_history["steps"], loss_history["class"], 'r-', label='类别损失')
+        
+        # 添加标题和标签
+        plt.title(f'DreamBooth训练损失 (进度: {global_step}/{max_train_steps})')
+        plt.xlabel('训练步骤')
+        plt.ylabel('损失值')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # 确保X轴使用整数刻度
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+        
+        # 保存图表
+        save_path = os.path.join(output_dir, "live_loss_curve.png")
+        plt.savefig(save_path, dpi=100)
+        plt.close()
+        
+    except Exception as e:
+        print(f"绘制损失曲线时出错: {str(e)}")

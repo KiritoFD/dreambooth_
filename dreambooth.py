@@ -7,8 +7,12 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 from PIL import Image
 
+# 添加matplotlib用于绘制损失曲线
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+
 from diffusers import StableDiffusionPipeline, DDPMScheduler, UNet2DConditionModel, AutoencoderKL
-from diffusers.optimization import get_scheduler  # <--- 添加此行
+from diffusers.optimization import get_scheduler
 from transformers import CLIPTextModel, CLIPTokenizer
 from accelerate import Accelerator
 
@@ -124,10 +128,6 @@ class DreamBoothDataset(Dataset):
         return len(self.instance_images) + len(self.class_images)
 
     def __getitem__(self, idx):
-        # Debugging __getitem__ - Initial call and lengths
-        print(f"[DreamBoothDataset DEBUG] __getitem__ called with idx: {idx}")
-        print(f"[DreamBoothDataset DEBUG] len(self.instance_images): {len(self.instance_images)}")
-        print(f"[DreamBoothDataset DEBUG] len(self.class_images): {len(self.class_images)}")
         
         # 交替返回实例和类别图片的策略，确保实例图片得到足够训练
         if len(self.instance_images) > 0 and (
@@ -166,6 +166,78 @@ def load_config(config_path):
     import json
     with open(config_path, "r") as f:
         return json.load(f)
+
+def plot_loss_curves(loss_history, output_dir, prefix=""):
+    """
+    绘制训练过程中的损失曲线并保存
+    
+    Args:
+        loss_history (dict): 包含'instance', 'class', 'total', 'steps'键的字典
+        output_dir (str): 保存图表的目录
+        prefix (str): 文件名前缀，可用于区分不同的训练运行
+    """
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 跳过空的损失历史
+    if not loss_history["steps"]:
+        print("损失历史为空，无法绘制损失曲线。")
+        return
+    
+    # 创建一个新的图表
+    plt.figure(figsize=(12, 8))
+    
+    # 绘制总损失
+    if loss_history["total"]:
+        plt.plot(loss_history["steps"], loss_history["total"], 'b-', 
+                 linewidth=2, label='总损失')
+    
+    # 绘制实例损失 (如果有)
+    if any(x != 0 for x in loss_history["instance"]):
+        plt.plot(loss_history["steps"], loss_history["instance"], 'g-', 
+                 linewidth=2, label='实例损失')
+    
+    # 绘制类别损失 (如果有)
+    if any(x != 0 for x in loss_history["class"]):
+        plt.plot(loss_history["steps"], loss_history["class"], 'r-',
+                 linewidth=2, label='类别损失')
+    
+    # 添加标题和标签
+    plt.title('DreamBooth 训练损失', fontsize=16)
+    plt.xlabel('训练步骤', fontsize=14)
+    plt.ylabel('损失值', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=12)
+    
+    # 强制x轴显示整数刻度(训练步骤)
+    plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+    
+    # 如果损失有剧烈波动，可以考虑使用对数尺度
+    if max(loss_history["total"]) / (min(x for x in loss_history["total"] if x > 0) + 1e-8) > 100:
+        plt.yscale('log')
+        plt.title('DreamBooth 训练损失 (对数尺度)', fontsize=16)
+    
+    # 保存图表
+    save_path = os.path.join(output_dir, f"{prefix}loss_curve.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"损失曲线已保存至: {save_path}")
+    
+    # 保存损失数据为CSV，便于后续分析
+    import csv
+    csv_path = os.path.join(output_dir, f"{prefix}loss_data.csv")
+    with open(csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Step', 'Total Loss', 'Instance Loss', 'Class Loss'])
+        for i, step in enumerate(loss_history["steps"]):
+            writer.writerow([
+                step, 
+                loss_history["total"][i], 
+                loss_history["instance"][i], 
+                loss_history["class"][i]
+            ])
+    print(f"损失数据已保存至: {csv_path}")
 
 def dreambooth_training(config):
     """DreamBooth核心训练逻辑"""
@@ -264,7 +336,7 @@ def dreambooth_training(config):
                 params_to_optimize,
                 lr=config["training"]["learning_rate"],
                 betas=(config["training"]["adam_beta1"], config["training"]["adam_beta2"]),
-                weight_decay=config["training"]["adam_weight_decay"],
+                weight_decay=config["training"]["adam_beta_weight_decay"],
                 eps=config["training"]["adam_epsilon"],
             )
         except Exception as e: # Catch any other exception during 8bit Adam creation
@@ -353,6 +425,11 @@ def dreambooth_training(config):
     )
 
     if accelerator.is_main_process:
+        # 在训练结束后绘制损失曲线
+        if loss_history and len(loss_history["steps"]) > 0:
+            prefix = f"{config['dataset']['instance_prompt'].split()[-1]}_"
+            plot_loss_curves(loss_history, config["paths"]["output_dir"], prefix)
+            
         accelerator.end_training()
 
     prompt_parts = config["dataset"]["instance_prompt"].split(" ")

@@ -44,7 +44,20 @@
     "num_validation_images": 4,
     "validation_steps": 100,
     "log_every_n_steps": 10,
-    "print_status_every_n_steps": 200
+    "print_status_every_n_steps": 200,
+    "save_model_config": {
+      "save_final_model": true,
+      "save_checkpoints": true,
+      "save_format": "diffusers",
+      "checkpoint_limit": 3,
+      "use_safetensors": true,
+      "add_timestamp": true,
+      "save_optimizer_state": true,
+      "save_precision": "fp16",
+      "auto_prune": true,
+      "checkpoint_naming_template": "{model_name}_{timestamp}_{step}"
+    },
+    "plot_loss": true
   },
   "memory_optimization": {
     "use_8bit_adam": true,
