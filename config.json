@@ -1,13 +1,13 @@
 {
   "paths": {
-    "pretrained_model_name_or_path": "CompVis/stable-diffusion-v1-4",
-    "instance_data_dir": "assets",
-    "class_data_dir": "output/class_images",
+    "pretrained_model_name_or_path": "stable-diffusion-v1-5",
+    "instance_data_dir": "assets/monk",
+    "class_data_dir": "output/class_images_jxy",
     "output_dir": "./output"
   },
   "dataset": {
-    "instance_prompt": "a sks witch",
-    "class_prompt": "a witch",
+    "instance_prompt": "a jxy furry robotic monkey",
+    "class_prompt": "a furry robotic monky",
     "resolution": 512,
     "center_crop": true,
     "train_batch_size": 16,
@@ -41,7 +41,7 @@
     "logging_dir": "./logs",
     "logging_dir_suffix": "logs",
     "report_to": "tensorboard",
-    "validation_prompt": "A photo of sks person in a new location",
+    "validation_prompt": "A photo of jxy furry robotic monkey in a new location",
     "num_validation_images": 4,
     "validation_steps": 100,
     "log_every_n_steps": 1,
@@ -50,13 +50,14 @@
       "save_final_model": true,
       "save_checkpoints": true,
       "save_format": "diffusers",
+      "checkpoint_path": "./checkpoints",
       "checkpoint_limit": 3,
       "use_safetensors": true,
       "add_timestamp": true,
       "save_optimizer_state": true,
       "save_precision": "fp16",
       "auto_prune": true,
-      "checkpoint_naming_template": "{model_name}_{timestamp}_{step}"
+      "checkpoint_naming_template": "jxy_monkey_{timestamp}_{step}"
     },
     "plot_loss": true
   },

@@ -423,7 +423,7 @@ def dreambooth_training(config):
                 params_to_optimize,
                 lr=config["training"]["learning_rate"],
                 betas=(config["training"]["adam_beta1"], config["training"]["adam_beta2"]),
-                weight_decay=config["training"]["adam_beta_weight_decay"],
+                weight_decay=config["training"]["adam_weight_decay"], # 修正参数名称
                 eps=config["training"]["adam_epsilon"],
             )
         except Exception as e: # Catch any other exception during 8bit Adam creation
@@ -432,7 +432,7 @@ def dreambooth_training(config):
                 params_to_optimize,
                 lr=config["training"]["learning_rate"],
                 betas=(config["training"]["adam_beta1"], config["training"]["adam_beta2"]),
-                weight_decay=config["training"]["adam_beta_weight_decay"],
+                weight_decay=config["training"]["adam_weight_decay"], # 修正参数名称
                 eps=config["training"]["adam_epsilon"],
             )
     else:
@@ -440,7 +440,7 @@ def dreambooth_training(config):
             params_to_optimize,
             lr=config["training"]["learning_rate"],
             betas=(config["training"]["adam_beta1"], config["training"]["adam_beta2"]),
-            weight_decay=config["training"]["adam_beta_weight_decay"],
+            weight_decay=config["training"]["adam_weight_decay"], # 修正参数名称
             eps=config["training"]["adam_epsilon"],
         )
         accelerator.print("Using standard AdamW optimizer.")
@@ -493,6 +493,12 @@ def dreambooth_training(config):
     
     accelerator.print(f"Using mixed precision: {config['training']['mixed_precision']}, corresponding to torch.dtype: {actual_mixed_precision_dtype}")
 
+    # 加载损失历史之前，确保类别图像目录存在
+    class_images_path = config["paths"]["class_data_dir"]
+    if class_images_path:
+        os.makedirs(class_images_path, exist_ok=True)
+        accelerator.print(f"已确保类别图像目录存在: {class_images_path}")
+    
     # 加载损失历史
     loss_csv_path = os.path.join(config["paths"]["output_dir"], "loss_data.csv")
     loss_history = load_loss_history(loss_csv_path)
@@ -501,7 +507,16 @@ def dreambooth_training(config):
     os.makedirs(config["paths"]["output_dir"], exist_ok=True)
     
     # 改进的断点重训逻辑
-    checkpoint_path = os.path.join(config["paths"]["output_dir"], "interrupt_checkpoint.pt")
+    # 获取配置中的检查点路径或使用默认路径
+    checkpoint_dir = config["logging_saving"].get("save_model_config", {}).get("checkpoint_path", config["paths"]["output_dir"])
+    # 确保检查点目录存在
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # 使用配置中的中断检查点路径或构建默认路径
+    interrupt_checkpoint_path = config["logging_saving"].get("save_model_config", {}).get("interrupt_checkpoint_path", 
+                                os.path.join(config["paths"]["output_dir"], "interrupt_checkpoint.pt"))
+    
+    accelerator.print(f"使用中断检查点路径: {interrupt_checkpoint_path}")
     resume_step = 0
     
     # 先检查是否有之前的训练损失记录
@@ -511,10 +526,10 @@ def dreambooth_training(config):
         resume_step = last_recorded_step + 1
     
     # 检查checkpoint文件是否存在
-    if os.path.exists(checkpoint_path):
-        print(f"找到断点重训检查点: {checkpoint_path}")
+    if os.path.exists(interrupt_checkpoint_path):
+        print(f"找到断点重训检查点: {interrupt_checkpoint_path}")
         try:
-            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            checkpoint = torch.load(interrupt_checkpoint_path, map_location="cpu")
             checkpoint_step = checkpoint.get("global_step", 0)
             
             # 如果检查点步骤大于loss记录的步骤，则使用检查点步骤

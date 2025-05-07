@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 def generate_prior_images(
     pipeline, class_prompt, output_dir, num_samples=200,
     batch_size=None, theory_notes_enabled=False, theory_step_fn=None,
-    use_local_models=False, local_model_path=None
+    use_local_models=False, local_model_path=None, class_images_dir=None
 ):
     """生成类别先验图像"""
     # 打印先验保留理论
@@ -20,9 +20,14 @@ def generate_prior_images(
             from theory_notes import print_theory_step
             print_theory_step("2", theory["title"], theory["description"])
     
-    # 创建输出目录
-    class_images_dir = os.path.join(output_dir, "class_images")
+    # 使用指定的类别图像目录或创建默认目录
+    if class_images_dir is None:
+        class_images_dir = os.path.join(output_dir, "class_images")
+        print(f"未指定类别图像目录，使用默认路径: {class_images_dir}")
+    
+    # 确保目录存在
     os.makedirs(class_images_dir, exist_ok=True)
+    print(f"使用类别图像目录: {class_images_dir}")
     
     # 检查现有图像
     existing_images = len([f for f in os.listdir(class_images_dir) 
