@@ -1,10 +1,10 @@
 import os
-import gc
-import torch
+import sys
 import argparse
-import datetime
-import json # Added for loading config
-from dreambooth import dreambooth_training # Assuming dreambooth_training is in dreambooth.py
+import json
+import torch
+from dreambooth import dreambooth_training
+from db_modules.inference_utils import load_inference_pipeline, generate_images
 
 def check_dependencies(): # Keep as a utility
     """检查必要的依赖项是否已安装"""
@@ -40,103 +40,94 @@ def load_config(config_path): # Helper function, same as in dreambooth.py
     return config
 
 def main():
-    print("\n【DreamBooth训练/推理工具】")
-    print("版本: (Config-Driven)") # Updated versioning note
+    parser = argparse.ArgumentParser(description="DreamBooth 训练与推理工具")
+    parser.add_argument("--config", type=str, default="config.json", help="配置文件路径")
     
-    missing_deps = check_dependencies()
-    if missing_deps:
-        print(f"错误: 缺少必要的依赖项: {', '.join(missing_deps)}")
-        print(f"请运行: pip install {' '.join(missing_deps)}")
-        return 1
-
-    parser = argparse.ArgumentParser(description="DreamBooth 训练和推理 (Config-Driven)")
-    parser.add_argument(
-        "--config_file",
-        type=str,
-        default="config.json",
-        help="Path to the configuration JSON file for training or inference.",
-    )
-    parser.add_argument("--train", action="store_true", help="执行训练模式 (参数来自config_file)")
-    parser.add_argument("--infer", action="store_true", help="执行推理模式 (参数来自config_file or specific args)")
-    parser.add_argument("--prompt", type=str, help="[推理模式] 推理时的提示词 (可覆盖config中的validation_prompt)")
-    parser.add_argument("--num_images", type=int, default=1, help="[推理模式] 生成图像数量")
-    parser.add_argument("--seed", type=int, help="[推理模式] 随机种子，用于可复现结果")
-
+    # 添加推理相关参数
+    parser.add_argument("--infer", action="store_true", help="进行推理模式而非训练模式")
+    parser.add_argument("--prompt", type=str, default=None, help="推理时的提示语")
+    parser.add_argument("--negative_prompt", type=str, default=None, help="推理时的否定提示语")
+    parser.add_argument("--num_images", type=int, default=4, help="要生成的图像数量")
+    parser.add_argument("--seed", type=int, default=None, help="随机种子")
+    parser.add_argument("--height", type=int, default=512, help="生成图像高度")
+    parser.add_argument("--width", type=int, default=512, help="生成图像宽度")
+    parser.add_argument("--output_dir", type=str, default=None, help="生成图像的输出目录")
+    
     args = parser.parse_args()
-
-    if not os.path.exists(args.config_file):
-        print(f"错误: 配置文件 '{args.config_file}' 未找到.")
+    
+    # 检查配置文件是否存在
+    if not os.path.exists(args.config):
+        print(f"错误: 配置文件 '{args.config}' 不存在")
         return 1
     
-    config_data = load_config(args.config_file)
-
-    if args.train:
-        print(f"开始训练，所有参数从 '{args.config_file}' 加载...")
-        
-        # 调试：打印数据集路径配置
-        dataset_config = config_data.get("dataset", {})
-        instance_data_dir = dataset_config.get("instance_data_dir")
-        class_data_dir = dataset_config.get("class_data_dir")
-        print(f"[DEBUG] 从配置加载的实例图片路径: {instance_data_dir}")
-        if class_data_dir:
-            print(f"[DEBUG] 从配置加载的类别图片路径: {class_data_dir}")
-        else:
-            print("[DEBUG] 未配置类别图片路径 (如果使用了先验保留，则会自动生成或需要指定)。")
-
-        identifier, training_successful = dreambooth_training(config_data)
-            
-        if training_successful:
-            print(f"训练成功完成。标识符: {identifier}")
-        else:
-            print(f"训练未成功完成或被中断。标识符: {identifier}")
-
-    elif args.infer:
-        print(f"开始推理，参数主要从 '{args.config_file}' 加载...")
-        infer_prompt = args.prompt if args.prompt else config_data.get("logging_saving", {}).get("validation_prompt", "a photo of a sks dog")
-        output_model_path = config_data["paths"]["output_dir"]
-        
-        if not os.path.exists(output_model_path):
-            print(f"错误: 推理所需的模型目录 '{output_model_path}' (来自config) 不存在。请先训练模型。")
-            return 1
-            
-        print(f"将使用模型目录: {output_model_path}")
-        print(f"提示词: {infer_prompt}")
-        
-        # 调用推理功能
-        try:
-            from inference import perform_inference
-            
-            num_images = args.num_images
-            seed = args.seed
-            
-            image_paths = perform_inference(
-                model_dir=output_model_path,
-                prompt=infer_prompt,
-                num_images=num_images,
-                seed=seed
-            )
-            
-            if image_paths:
-                print(f"\n推理完成！")
-                print(f"生成了 {len(image_paths)} 张图像，保存在: {os.path.dirname(image_paths[0])}")
-            else:
-                print(f"\n推理失败，未生成图像。请查看上方错误信息。")
-            
-        except ImportError:
-            print("错误: 未能导入推理模块。请确保 'inference.py' 文件存在。")
-            return 1
-        except Exception as e:
-            print(f"执行推理时发生错误: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return 1
-
-    else:
-        print("请指定操作模式: --train 或 --infer")
-        print(f"示例: python main.py --train --config_file my_custom_config.json")
-        print(f"示例: python main.py --infer --config_file my_custom_config.json --prompt \"a photo of sks person\"")
+    # 加载配置
+    with open(args.config, "r") as f:
+        config_data = json.load(f)
     
-    return 0
+    # 确保配置中包含inference部分
+    if "inference" not in config_data:
+        config_data["inference"] = {
+            "num_inference_steps": 50,
+            "guidance_scale": 7.5,
+            "negative_prompt": "ugly, blurry, poor quality, deformed, disfigured, malformed limbs, missing limbs, bad anatomy, bad proportions",
+            "scheduler": "DPMSolverMultistep",
+            "use_karras_sigmas": True,
+            "noise_offset": 0.1,
+            "vae_batch_size": 1,
+            "high_quality_mode": True
+        }
+    
+    if args.infer:
+        # 推理模式
+        print("启动推理模式...")
+        
+        # 确定设备
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"使用设备: {device}")
+        
+        # 加载推理管道
+        pipe, model_path, model_info = load_inference_pipeline(config_data, device)
+        print(f"使用模型: {model_info}")
+        
+        # 设置提示语
+        if args.prompt is None:
+            # 如果未提供提示语，使用实例提示加上一些修饰词
+            instance_token = config_data["dataset"]["instance_prompt"].split()[-1]
+            # 提取实例提示中除了最后一个词（通常是特定标识符）之外的内容
+            category = ' '.join(config_data["dataset"]["instance_prompt"].split()[:-1]).strip('a ').strip('an ')
+            args.prompt = f"a {instance_token} {category}, masterpiece, highly detailed, high quality"
+            print(f"未提供提示语，使用默认提示: {args.prompt}")
+        
+        # 生成图像
+        saved_paths = generate_images(
+            pipe,
+            args.prompt,
+            config_data,
+            negative_prompt=args.negative_prompt,
+            height=args.height,
+            width=args.width,
+            num_images=args.num_images,
+            seed=args.seed,
+            output_dir=args.output_dir
+        )
+        
+        # 显示生成的图像路径
+        print("\n生成的图像:")
+        for i, path in enumerate(saved_paths):
+            print(f"{i+1}. {path}")
+        
+        return 0
+    else:
+        # 训练模式
+        print("启动训练模式...")
+        identifier, training_successful = dreambooth_training(config_data)
+        
+        if training_successful:
+            print(f"DreamBooth 训练成功完成，标识符: {identifier}")
+            return 0
+        else:
+            print(f"DreamBooth 训练失败或被中断，标识符: {identifier}")
+            return 1
 
 if __name__ == "__main__":
     exit(main())

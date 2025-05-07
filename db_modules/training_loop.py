@@ -294,33 +294,14 @@ def execute_training_loop(
                         
                         accelerator.print(loss_str)
                     
-                    if accelerator.is_main_process and global_step % 10 == 0:
-                        accelerator.print(f"Step {global_step}: Loss val={loss.item() if isinstance(loss, torch.Tensor) else loss}, grad_fn={loss.grad_fn if isinstance(loss, torch.Tensor) else 'N/A'}, req_grad={loss.requires_grad if isinstance(loss, torch.Tensor) else 'N/A'}")
-                        if isinstance(loss, torch.Tensor) and loss.grad_fn is None and loss.requires_grad:
-                            accelerator.print("Warning: Loss requires_grad but has no grad_fn. This is unusual.")
-                        elif isinstance(loss, torch.Tensor) and not loss.requires_grad:
-                            accelerator.print("CRITICAL: Loss does not require_grad. Gradients will not be computed.")
-                    
-                    if monitor_loss_flag and loss_monitor:  # Use the flag from config
-                        is_loss_ok = loss_monitor.check_loss(
-                            instance_loss=instance_loss_val.item() if isinstance(instance_loss_val, torch.Tensor) else instance_loss_val,
-                            prior_loss=class_loss_val.item() if isinstance(class_loss_val, torch.Tensor) else class_loss_val,
-                            total_loss=loss.item() if isinstance(loss, torch.Tensor) else loss,
-                            step=global_step
-                        )
-                        if not is_loss_ok:
-                            suggestions = loss_monitor.suggest_fixes()
-                            accelerator.print("\n⚠️ 损失异常，建议:")
-                            for suggestion in suggestions:
-                                accelerator.print(f"  - {suggestion}")
-                    
-                    if accelerator.is_main_process and global_step % log_every_n_steps == 0:  # Use from config
+                    # 修改：记录每一步的损失，不再使用log_every_n_steps的条件
+                    if accelerator.is_main_process:
                         log_losses(
                             accelerator, loss, instance_loss_val, class_loss_val,
-                            global_step, max_train_steps, loss_history, debug_monitor, lr_scheduler, optimizer  # Pass optimizer for LR access
+                            global_step, max_train_steps, loss_history, debug_monitor, lr_scheduler, optimizer
                         )
                     
-                    if global_step % print_status_every_n_steps == 0 and global_step > 0 and accelerator.is_main_process:  # Use from config
+                    if global_step % print_status_every_n_steps == 0 and global_step > 0 and accelerator.is_main_process:
                         print_training_status(
                             global_step, max_train_steps, loss, instance_loss_val, class_loss_val, prior_preservation_weight
                         )
@@ -333,7 +314,7 @@ def execute_training_loop(
                     optimizer.step()
                     optimizer.zero_grad()
                 
-                # 保存损失值到CSV文件
+                # 修改：每一步都保存损失值到CSV文件
                 if accelerator.is_main_process:
                     append_loss_to_csv(
                         loss_csv_path,

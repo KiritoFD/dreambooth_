@@ -10,12 +10,12 @@
     "class_prompt": "a witch",
     "resolution": 512,
     "center_crop": true,
-    "train_batch_size": 8,
+    "train_batch_size": 16,
     "dataloader_num_workers": 0
   },
   "training": {
-    "max_train_steps": 10000,
-    "learning_rate": 1e-4,
+    "max_train_steps": 200,
+    "learning_rate": 0.00114514,
     "scale_lr": false,
     "lr_scheduler": "constant",
     "lr_warmup_steps": 0,
@@ -44,7 +44,7 @@
     "validation_prompt": "A photo of sks person in a new location",
     "num_validation_images": 4,
     "validation_steps": 100,
-    "log_every_n_steps": 10,
+    "log_every_n_steps": 1,
     "print_status_every_n_steps": 200,
     "save_model_config": {
       "save_final_model": true,
@@ -70,5 +70,15 @@
   },
   "advanced":{
     "monitor_loss_in_loop": true
+  },
+  "inference": {
+    "num_inference_steps": 50,
+    "guidance_scale": 7.5,
+    "negative_prompt": "ugly, blurry, poor quality, deformed, disfigured, malformed limbs, missing limbs, bad anatomy, bad proportions",
+    "scheduler": "DPMSolverMultistep",
+    "use_karras_sigmas": true,
+    "noise_offset": 0.1,
+    "vae_batch_size": 1,
+    "high_quality_mode": true
   }
 }
