@@ -6,7 +6,7 @@ import os
 # import sys # Not used directly
 import time
 import gc
-from datetime import datetime
+from datetime import datetime, timedelta  # 正确导入 timedelta
 import torch
 import json # For loading config
 import argparse # For specifying config file
@@ -21,7 +21,7 @@ def load_config(config_path): # Helper
         config = json.load(f)
     return config
 
-def auto_train_entry(config_file_path, iterations=1): # iterations can be part of config too
+def auto_train_entry(config_file_path, iterations=200): # iterations can be part of config too
     """
     自动训练入口点，加载配置并执行训练。
     
@@ -40,6 +40,7 @@ def auto_train_entry(config_file_path, iterations=1): # iterations can be part o
 
     print(f"\n" + "="*80)
     print(f"DreamBooth 自动训练开始 (Config-Driven)")
+    iterations +=200
     print(f"计划执行 {iterations} 次训练迭代使用配置: {config_file_path}")
     start_time = datetime.now()
     print(f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -68,8 +69,8 @@ def auto_train_entry(config_file_path, iterations=1): # iterations can be part o
         if i > 0:
             avg_time_per_iter = elapsed_total / i
             eta_seconds = avg_time_per_iter * (iterations - i)
-            eta_str = str(datetime.timedelta(seconds=int(eta_seconds)))
-            print(f"已用时: {str(datetime.timedelta(seconds=int(elapsed_total)))} - 预计剩余: {eta_str}")
+            eta_str = str(timedelta(seconds=int(eta_seconds)))
+            print(f"已用时: {str(timedelta(seconds=int(elapsed_total)))} - 预计剩余: {eta_str}")
         print(f"当前时间: {curr_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"使用模型 (来自config): {config_data.get('paths', {}).get('pretrained_model_name_or_path')}")
         print("-"*80)

@@ -2,7 +2,7 @@
   "paths": {
     "pretrained_model_name_or_path": "stable-diffusion-v1-5",
     "instance_data_dir": "assets/monk",
-    "class_data_dir": "output/class_images_jxy",
+    "class_data_dir": "output/class_images_jxy_1/class_images",
     "output_dir": "./output"
   },
   "dataset": {
@@ -10,12 +10,12 @@
     "class_prompt": "a furry robotic monky",
     "resolution": 512,
     "center_crop": true,
-    "train_batch_size": 16,
+    "train_batch_size": 32,
     "dataloader_num_workers": 0
   },
   "training": {
-    "max_train_steps": 200,
-    "learning_rate": 0.00114514,
+    "max_train_steps": 2000,
+    "learning_rate": 0.000114514,
     "scale_lr": false,
     "lr_scheduler": "constant",
     "lr_warmup_steps": 0,
