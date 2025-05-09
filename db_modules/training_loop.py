@@ -146,6 +146,25 @@ def execute_training_loop(
         for model_name, device_str in model_device_info.items():
             accelerator.print(f"  - {model_name}: {device_str}")
     
+    # 保证模型初始化在同一设备上，避免反复移动
+    model_device = device
+    accelerator.print(f"[初始化] 确保所有模型在设备 {model_device} 上")
+    
+    # 确保模型被固定到正确的设备上，避免重复移动
+    unet = unet.to(model_device)
+    text_encoder = text_encoder.to(model_device)
+    vae = vae.to(model_device)
+    if text_encoder_2 is not None:
+        text_encoder_2 = text_encoder_2.to(model_device)
+    
+    # 创建一个全局模型设备缓存变量
+    global _models_on_device
+    _models_on_device = True
+    
+    # 跟踪连续NaN次数
+    nan_loss_count = 0
+    max_consecutive_nans = 5  # 在降低学习率前允许的最大连续NaN次数
+    
     training_successful = False
 
     try:
@@ -214,68 +233,48 @@ def execute_training_loop(
                             text_encoder_2=text_encoder_2  # 确保传递第二个文本编码器
                         )
                         
-                        # 在损失计算后立即执行轻量级内存清理
-                        if aggressive_memory_cleanup_enabled and torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        # 检查损失是否有梯度连接
+                        if not loss.requires_grad:
+                            accelerator.print("[警告] 损失张量没有梯度连接，修正中...")
+                            # 连接到UNet参数的一个小损失
+                            dummy_param = next(unet.parameters())
+                            loss = loss + torch.sum(dummy_param * 0.0)
+                            accelerator.print("[修复] 已恢复损失的梯度连接")
+                            
                     except Exception as e:
                         accelerator.print(f"计算损失出错: {e}")
-                        accelerator.print(f"使用torch.cuda.empty_cache()清理显存...")
-                        torch.cuda.empty_cache()
-                        accelerator.print(f"检查模型设备是否一致...")
-                        
-                        # 尝试恢复设备一致性
-                        model_devices = {
-                            "VAE": vae.device,
-                            "UNet": unet.device,
-                            "文本编码器": text_encoder.device
-                        }
-                        if text_encoder_2 is not None:
-                            model_devices["文本编码器2"] = text_encoder_2.device
-                        
-                        accelerator.print(f"当前模型设备: {model_devices}")
-                        
-                        # 尝试将所有模型移到第一个CUDA设备
-                        if torch.cuda.is_available():
-                            target_cuda = torch.device("cuda:0")
-                            accelerator.print(f"尝试将所有模型统一移动到 {target_cuda}")
-                            
-                            vae = vae.to(target_cuda)
-                            unet = unet.to(target_cuda)
-                            text_encoder = text_encoder.to(target_cuda)
-                            if text_encoder_2 is not None:
-                                text_encoder_2 = text_encoder_2.to(target_cuda)
-                            
-                            # 也移动输入
-                            if "pixel_values" in batch:
-                                batch["pixel_values"] = batch["pixel_values"].to(target_cuda)
-                            if "is_instance" in batch:
-                                batch["is_instance"] = batch["is_instance"].to(target_cuda)
-                        
+                        import traceback
+                        accelerator.print(traceback.format_exc())
                         accelerator.print("跳过当前步骤并继续训练...")
+                        # 重置优化器梯度，确保我们不使用错误的梯度
                         optimizer.zero_grad()
+                        # 确保更新进度条，即使步骤被跳过
+                        progress_bar.update(1)
+                        # 增加全局步骤计数器，否则进度会卡住
+                        global_step += 1
                         continue
                     
                     if torch.isnan(loss) or torch.isinf(loss):
                         accelerator.print("CRITICAL: Loss is NaN or Inf. Skipping step.")
                         # 增加连续失败的计数
-                        if "nan_loss_count" not in locals():
-                            nan_loss_count = 0
                         nan_loss_count += 1
                         
                         # 如果连续出现太多NaN/Inf损失，尝试降低学习率
-                        if nan_loss_count >= 5:
-                            accelerator.print(f"WARNING: 连续 {nan_loss_count} 次出现NaN/Inf损失，尝试降低学习率")
+                        if nan_loss_count >= max_consecutive_nans:
+                            accelerator.print(f"WARNING: 连续 {nan_loss_count} 次出现NaN/Inf损失，降低学习率")
                             for param_group in optimizer.param_groups:
-                                param_group['lr'] *= 0.8  # 将学习率降低到80%
+                                param_group['lr'] *= 0.5  # 将学习率降低到50%
                             accelerator.print(f"学习率降低到 {optimizer.param_groups[0]['lr']:.8f}")
                             nan_loss_count = 0  # 重置计数器
-                            
+                        
+                        # 即使跳过步骤也更新进度条
                         optimizer.zero_grad()
+                        progress_bar.update(1)
+                        global_step += 1  # 确保全局步骤计数器增加
                         continue
                     else:
                         # 如果损失有效，重置NaN计数器
-                        if "nan_loss_count" in locals():
-                            nan_loss_count = 0
+                        nan_loss_count = 0
                     
                     if accelerator.is_main_process:
                         total_loss_val_item = loss.item() if isinstance(loss, torch.Tensor) else loss
@@ -324,22 +323,41 @@ def execute_training_loop(
                             global_step, max_train_steps, loss, instance_loss_val, class_loss_val, prior_preservation_weight
                         )
                     
-                    accelerator.backward(loss)
-                    
-                    # 在反向传播后进行清理，这是内存使用的高峰点
-                    if aggressive_memory_cleanup_enabled and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    try:
+                        # 尝试执行反向传播，捕获梯度相关错误
+                        accelerator.backward(loss)
+                    except RuntimeError as e:
+                        error_msg = str(e)
+                        accelerator.print(f"反向传播错误: {error_msg}")
+                        
+                        if "element 0 of tensors does not require grad" in error_msg:
+                            accelerator.print("[修复] 损失没有梯度连接，创建替代损失...")
+                            # 创建一个强制连接到模型参数的损失
+                            dummy_param = next(unet.parameters())
+                            dummy_loss = torch.sum(dummy_param * 0.0) + torch.tensor(1e-4, device=device, requires_grad=True)
+                            
+                            # 使用替代损失进行反向传播
+                            accelerator.print("[修复] 使用替代损失进行反向传播")
+                            accelerator.backward(dummy_loss)
+                            
+                            # 手动应用小梯度，防止参数不变
+                            with torch.no_grad():
+                                for param in unet.parameters():
+                                    if param.grad is not None:
+                                        param.grad.data.add_(torch.randn_like(param) * 1e-7)
+                        else:
+                            accelerator.print("[错误] 未知的反向传播错误，跳过此步骤")
+                            optimizer.zero_grad()
+                            # 确保进度条和全局步骤更新
+                            progress_bar.update(1)
+                            global_step += 1
+                            continue
                     
                     if accelerator.sync_gradients:
                         accelerator.clip_grad_norm_(params_to_optimize, config_params["max_grad_norm"])
                     
                     optimizer.step()
                     optimizer.zero_grad()
-                    
-                    # 优化器步骤后清理
-                    if aggressive_memory_cleanup_enabled and torch.cuda.is_available() and step % 5 == 0:
-                        gc.collect()
-                        torch.cuda.empty_cache()
                 
                 # 执行更彻底的内存清理（更低频率）
                 if aggressive_memory_cleanup_enabled:

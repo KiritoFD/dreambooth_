@@ -218,6 +218,30 @@ def initialize_training_environment(
             max_gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
             accelerator.print(f"当前GPU内存使用: {current_gpu_memory:.2f}GB / {max_gpu_memory:.2f}GB ({current_gpu_memory/max_gpu_memory*100:.1f}%)")
 
+    # 根据配置确定是否使用半精度
+    mixed_precision = config["training"].get("mixed_precision", "no")
+    
+    if isinstance(mixed_precision, str):
+        if mixed_precision == "fp16":
+            mixed_precision_dtype = torch.float16
+            unet_dtype = torch.float16
+            accelerator.print(f"[INFO] 将使用半精度 float16 进行训练和UNet计算")
+        elif mixed_precision == "bf16":
+            mixed_precision_dtype = torch.bfloat16
+            unet_dtype = torch.bfloat16
+            accelerator.print(f"[INFO] 将使用半精度 bfloat16 进行训练和UNet计算")
+        else:
+            mixed_precision_dtype = torch.float32
+            unet_dtype = torch.float32
+            accelerator.print(f"[INFO] 将使用全精度 float32 进行训练和UNet计算")
+    else:
+        mixed_precision_dtype = mixed_precision
+        unet_dtype = mixed_precision_dtype
+    
+    # 强制将UNet转换为目标精度
+    accelerator.print(f"[INFO] 将UNet模型转换为 {unet_dtype}")
+    unet = unet.to(dtype=unet_dtype)
+
     return {
         "noise_scheduler": current_noise_scheduler,
         "global_step": global_step,
@@ -226,7 +250,7 @@ def initialize_training_environment(
         "progress_bar": progress_bar,
         "image_progress": image_progress,
         "device": device,
-        "unet_dtype": mixed_precision_dtype,
+        "unet_dtype": unet_dtype,
         "instance_text_inputs": instance_text_inputs,
         "class_text_inputs": class_text_inputs,
         "text_encoder_2": text_encoder_2  # 添加第二个文本编码器
