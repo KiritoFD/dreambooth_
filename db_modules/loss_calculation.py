@@ -69,15 +69,87 @@ def compute_loss(
         instance_emb = None
         class_emb = None
         
+        # 检查是否使用SDXL模型 - 更健壮的检测方法
+        is_sdxl = False
+        # 首先从配置中检查
+        if config and "advanced" in config and "model_type" in config["advanced"]:
+            is_sdxl = config["advanced"]["model_type"].lower() == "sdxl"
+        else:
+            # 从UNet的特性检查是否为SDXL
+            # SDXL的UNet通常具有更大的cross_attention_dim (2048 vs 768/1024)
+            if hasattr(unet, "config") and hasattr(unet.config, "cross_attention_dim"):
+                is_sdxl = unet.config.cross_attention_dim >= 2048
+            elif hasattr(unet, "add_embedding") and "added_cond_kwargs" in str(unet.forward.__code__.co_varnames):
+                is_sdxl = True
+        
+        # 为SDXL模型准备额外的条件参数
+        added_cond_kwargs = None
+        if is_sdxl:
+            # 创建默认的text_embeds和time_ids
+            batch_size = latents.shape[0]
+            # 为SDXL模型创建text_embeds（维度为1280）
+            text_embeds = torch.zeros((batch_size, 1280), device=device, dtype=unet_dtype)
+            # 为SDXL模型创建time_ids（使用默认形状）
+            time_ids = torch.zeros((batch_size, 6), device=device, dtype=unet_dtype)
+            added_cond_kwargs = {"text_embeds": text_embeds, "time_ids": time_ids}
+            
+            accelerator.print(f"[INFO] 已检测到SDXL模型，添加必要的条件参数")
+        
+        # 对于SDXL和非SDXL模型使用不同的文本处理方法
         if torch.any(is_instance):
             with torch.set_grad_enabled(config["training"]["train_text_encoder"]):
                 instance_emb_raw = text_encoder(instance_text_inputs.input_ids)[0]
+                
+                # SDXL模型需要特殊处理文本嵌入
+                if is_sdxl:
+                    # 检查是否有第二个文本编码器
+                    if "text_encoder_2" in config and config["text_encoder_2"] is not None:
+                        text_encoder_2 = config["text_encoder_2"]
+                        instance_emb_raw_2 = text_encoder_2(instance_text_inputs.input_ids)[0]
+                        # 创建SDXL特定的嵌入格式
+                        # 注意：SDXL的UNet期望的嵌入维度为77×2048
+                        # 我们需要将两个编码器的输出重新调整为正确的尺寸
+                        instance_emb_raw = torch.cat([
+                            torch.zeros((instance_emb_raw.shape[0], 77, 2048-768-1280), 
+                                       device=device, dtype=instance_emb_raw.dtype),
+                            instance_emb_raw,  # 第一个编码器的输出 (77x768)
+                            instance_emb_raw_2  # 第二个编码器的输出 (77x1280) 
+                        ], dim=-1)
+                    else:
+                        # 如果没有第二个编码器，进行简单填充
+                        accelerator.print("[WARN] SDXL模型但缺少第二个文本编码器，进行零填充")
+                        # 填充到SDXL期望的2048维度
+                        padding = torch.zeros((instance_emb_raw.shape[0], 77, 2048-768), 
+                                             device=device, dtype=instance_emb_raw.dtype)
+                        instance_emb_raw = torch.cat([instance_emb_raw, padding], dim=-1)
+                
             # 确保它与 unet 数据类型匹配
             instance_emb = instance_emb_raw.to(dtype=unet_dtype)
 
         if class_text_inputs is not None and torch.any(~is_instance) and prior_preservation_weight > 0:
             with torch.set_grad_enabled(config["training"]["train_text_encoder"]):
                 class_emb_raw = text_encoder(class_text_inputs.input_ids)[0]
+                
+                # SDXL模型需要特殊处理文本嵌入
+                if is_sdxl:
+                    # 检查是否有第二个文本编码器
+                    if "text_encoder_2" in config and config["text_encoder_2"] is not None:
+                        text_encoder_2 = config["text_encoder_2"]
+                        class_emb_raw_2 = text_encoder_2(class_text_inputs.input_ids)[0]
+                        # 创建SDXL特定的嵌入格式
+                        class_emb_raw = torch.cat([
+                            torch.zeros((class_emb_raw.shape[0], 77, 2048-768-1280), 
+                                       device=device, dtype=class_emb_raw.dtype),
+                            class_emb_raw,  # 第一个编码器 (77x768)
+                            class_emb_raw_2  # 第二个编码器 (77x1280)
+                        ], dim=-1)
+                    else:
+                        # 如果没有第二个编码器，进行简单填充
+                        # 填充到SDXL期望的2048维度
+                        padding = torch.zeros((class_emb_raw.shape[0], 77, 2048-768), 
+                                             device=device, dtype=class_emb_raw.dtype)
+                        class_emb_raw = torch.cat([class_emb_raw, padding], dim=-1)
+                
             # 确保它与 unet 数据类型匹配
             class_emb = class_emb_raw.to(dtype=unet_dtype)
 
@@ -88,11 +160,20 @@ def compute_loss(
         class_count = torch.sum(~is_instance).item()
 
         if instance_count > 0:
+            # 为instance准备SDXL条件参数（如果需要）
+            instance_added_cond_kwargs = None
+            if is_sdxl and added_cond_kwargs:
+                instance_added_cond_kwargs = {
+                    "text_embeds": added_cond_kwargs["text_embeds"][is_instance],
+                    "time_ids": added_cond_kwargs["time_ids"][is_instance]
+                }
+            
             # 确保 timesteps 的类型是 long，而不是 UNet 期望的其他类型
             instance_pred = unet(
                 noisy_latents[is_instance],
                 timesteps[is_instance],
-                encoder_hidden_states=instance_emb.repeat(instance_count, 1, 1)
+                encoder_hidden_states=instance_emb.repeat(instance_count, 1, 1),
+                added_cond_kwargs=instance_added_cond_kwargs
             ).sample
             
             # MSE 损失计算应该使用 float32 以提高数值稳定性
@@ -104,11 +185,20 @@ def compute_loss(
             instance_loss_val = instance_loss_tensor
         
         if class_count > 0:
+            # 为class准备SDXL条件参数（如果需要）
+            class_added_cond_kwargs = None
+            if is_sdxl and added_cond_kwargs:
+                class_added_cond_kwargs = {
+                    "text_embeds": added_cond_kwargs["text_embeds"][~is_instance],
+                    "time_ids": added_cond_kwargs["time_ids"][~is_instance]
+                }
+                
             # 确保所有输入到 unet 的数据都是正确的数据类型
             class_pred = unet(
                 noisy_latents[~is_instance].to(dtype=unet_dtype),  # 显式转换为与 unet 相同的数据类型
                 timesteps[~is_instance].long(),  # 确保时间步是长整数
-                encoder_hidden_states=class_emb.repeat(class_count, 1, 1).to(dtype=unet_dtype)  # 显式转换数据类型
+                encoder_hidden_states=class_emb.repeat(class_count, 1, 1).to(dtype=unet_dtype),  # 显式转换数据类型
+                added_cond_kwargs=class_added_cond_kwargs
             ).sample
             
             # MSE 损失计算应该使用 float32 以提高数值稳定性

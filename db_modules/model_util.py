@@ -23,7 +23,7 @@ def ensure_local_model(model_id, local_dir=None, use_auth_token=None, revision=N
     返回:
         str: 本地模型路径
     """
-    # 默认使用huggingface缓存目录
+    # 默认使用huggingface缓存目录P
     if local_dir is None:
         cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
     else:

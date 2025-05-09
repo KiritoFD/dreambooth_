@@ -1,6 +1,6 @@
 {
   "paths": {
-    "pretrained_model_name_or_path": "stable-diffusion-v1-5",
+    "pretrained_model_name_or_path": "stabilityai/stable-diffusion-xl-base-1.0",
     "instance_data_dir": "assets/monk",
     "class_data_dir": "output/class_images_jxy_1/class_images",
     "output_dir": "./output"
@@ -10,7 +10,7 @@
     "class_prompt": "a furry robotic monky",
     "resolution": 512,
     "center_crop": true,
-    "train_batch_size": 24,
+    "train_batch_size": 2,
     "dataloader_num_workers": 0
   },
   "training": {
@@ -70,7 +70,8 @@
     "low_memory_mode_execute_loop": false
   },
   "advanced":{
-    "monitor_loss_in_loop": true
+    "monitor_loss_in_loop": true,
+    "model_type": "sdxl"
   },
   "inference": {
     "num_inference_steps": 50,
