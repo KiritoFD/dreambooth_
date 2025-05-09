@@ -367,10 +367,70 @@ def dreambooth_training(config):
         config["paths"]["pretrained_model_name_or_path"], subfolder="unet", revision=revision_from_config
     )
 
+    # 增加对SDXL的支持 - 加载第二个文本编码器
+    text_encoder_2 = None
+    if config.get("advanced", {}).get("model_type", "").lower() == "sdxl":
+        try:
+            accelerator.print("检测到SDXL配置，正在加载第二个文本编码器...")
+            from transformers import CLIPTextModelWithProjection
+            text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+                config["paths"]["pretrained_model_name_or_path"], 
+                subfolder="text_encoder_2", 
+                revision=revision_from_config
+            )
+            
+            # 应用与第一个编码器相同的训练配置
+            if not config["training"]["train_text_encoder"]:
+                text_encoder_2.requires_grad_(False)
+                text_encoder_2.to(accelerator.device, dtype=torch.float32)
+            elif config["training"]["gradient_checkpointing"]:
+                text_encoder_2.gradient_checkpointing_enable()
+                
+            accelerator.print("成功加载SDXL第二个文本编码器")
+            
+            # 将SDXL第二个文本编码器添加到config供后续使用
+            config["text_encoder_2"] = text_encoder_2
+        except Exception as e:
+            accelerator.print(f"加载SDXL第二个文本编码器失败: {e}")
+            accelerator.print("将尝试继续训练，但可能影响结果质量")
+
+    # 确保所有模型在同一设备上（统一设为CUDA）
+    device = accelerator.device
+    
+    # 明确将所有模型移动到目标设备
+    vae = vae.to(device)
+    text_encoder = text_encoder.to(device)
+    unet = unet.to(device)
+    if text_encoder_2 is not None:
+        text_encoder_2 = text_encoder_2.to(device)
+
     # Freeze VAE
     vae.requires_grad_(False)
-    # Move VAE to device, typically in float32 for stability
-    vae.to(accelerator.device, dtype=torch.float32)
+    
+    # 验证模型已经正确移动到设备上
+    if accelerator.is_main_process:
+        model_devices = {
+            "VAE": next(vae.parameters()).device,
+            "Text Encoder": next(text_encoder.parameters()).device,
+            "UNet": next(unet.parameters()).device
+        }
+        if text_encoder_2 is not None:
+            model_devices["Text Encoder 2"] = next(text_encoder_2.parameters()).device
+            
+        accelerator.print("[设备验证] 各模型当前设备:")
+        for model_name, model_device in model_devices.items():
+            accelerator.print(f"  - {model_name}: {model_device}")
+            if model_device != device:
+                accelerator.print(f"    [警告] {model_name}不在目标设备({device})上!")
+                # 再次尝试移动
+                if model_name == "VAE":
+                    vae = vae.to(device)
+                elif model_name == "Text Encoder":
+                    text_encoder = text_encoder.to(device)
+                elif model_name == "UNet":
+                    unet = unet.to(device)
+                elif model_name == "Text Encoder 2":
+                    text_encoder_2 = text_encoder_2.to(device)
 
     # Handle Text Encoder:
     if not config["training"]["train_text_encoder"]:
@@ -383,6 +443,34 @@ def dreambooth_training(config):
         unet.enable_gradient_checkpointing()
         if config["training"]["train_text_encoder"]: # Only if text_encoder is also meant to be trained
             text_encoder.gradient_checkpointing_enable()
+
+    # 添加显存优化配置
+    # 判断是否需要进行特殊的显存优化
+    if config["memory_optimization"].get("low_memory_mode", False):
+        accelerator.print("启用低显存训练模式")
+        
+        # 应用额外优化
+        try:
+            # 尝试导入并应用优化
+            from db_modules.memory_optimization import optimize_model_for_training
+            
+            mem_config = {
+                "attention_slice_size": config["memory_optimization"].get("attention_slice_size", 4),
+                "gradient_checkpointing": config["training"].get("gradient_checkpointing", True),
+                "disable_text_encoder_training": not config["training"].get("train_text_encoder", False),
+                "xformers_optimization": config["memory_optimization"].get("xformers_optimization", True)
+            }
+            
+            unet, text_encoder = optimize_model_for_training(unet, text_encoder, mem_config)
+            accelerator.print("已应用内存优化设置")
+            
+            # 如果是SDXL，同样优化第二个文本编码器
+            if text_encoder_2 is not None and config["training"]["train_text_encoder"]:
+                text_encoder_2 = optimize_model_for_training(text_encoder_2, None, mem_config)[0]
+        except ImportError:
+            accelerator.print("无法导入内存优化模块，跳过高级内存优化")
+        except Exception as e:
+            accelerator.print(f"应用内存优化时出错: {e}")
 
     # Optimizer
     params_to_optimize = list(filter(lambda p: p.requires_grad, unet.parameters()))
@@ -481,6 +569,13 @@ def dreambooth_training(config):
         num_workers=config["dataset"]["dataloader_num_workers"],
         collate_fn=None, # Add custom collate_fn if needed
     )
+
+    # 确认数据加载器批次大小匹配预期
+    if len(train_dataloader) == 0:
+        batch_size_warning = (
+            f"警告: 数据加载器为空! 批次大小({config['dataset']['train_batch_size']})可能大于数据集大小({len(train_dataset)})"
+        )
+        accelerator.print(batch_size_warning)
 
     # Determine the mixed_precision_dtype that accelerator is using for its models
     actual_mixed_precision_dtype = torch.float32 # Default if "no" or unrecognized
@@ -600,7 +695,8 @@ def dreambooth_training(config):
         debug_monitor=None,
         loss_monitor=None,
         mixed_precision_dtype=actual_mixed_precision_dtype,
-        loss_csv_path=loss_csv_path  # 传递CSV路径
+        loss_csv_path=loss_csv_path,  # 传递CSV路径
+        text_encoder_2=text_encoder_2  # 传递第二个文本编码器
     )
 
     if accelerator.is_main_process:

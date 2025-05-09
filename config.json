@@ -8,7 +8,7 @@
   "dataset": {
     "instance_prompt": "a jxy furry robotic monkey",
     "class_prompt": "a furry robotic monky",
-    "resolution": 512,
+    "resolution": 1024,
     "center_crop": true,
     "train_batch_size": 2,
     "dataloader_num_workers": 0
@@ -63,11 +63,18 @@
   },
   "memory_optimization": {
     "use_8bit_adam": true,
-    "attention_slice_size": null,
+    "attention_slice_size": 4,
     "xformers_optimization": true,
     "offload_optimizer_to_cpu": false,
-    "aggressive_gc": false,
-    "low_memory_mode_execute_loop": false
+    "aggressive_gc": true,
+    "low_memory_mode": false,
+    "limit_gpu_memory": false,
+    "gpu_memory_fraction": 0.85,
+    "lower_text_encoder_precision": true,
+    "lower_loss_precision": true,
+    "low_memory_mode_execute_loop": true,
+    "monitor_memory": true,
+    "memory_cleanup_frequency": 5
   },
   "advanced":{
     "monitor_loss_in_loop": true,

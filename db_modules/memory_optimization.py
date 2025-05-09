@@ -208,6 +208,13 @@ def aggressive_memory_cleanup():
             torch._C._cuda_clearCublasWorkspaces()
         except:
             pass
+        
+        # 尝试重置CUDA设备，更激进的方式（谨慎使用）
+        try:
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_accumulated_memory_stats()
+        except:
+            pass
 
 
 def get_memory_status():
@@ -257,7 +264,131 @@ def print_memory_stats():
         print("GPU未可用")
     
     print("="*60)
+
+
+def enforce_memory_limits(gpu_memory_fraction=0.9):
+    """
+    强制执行内存限制，防止内存溢出
     
+    Args:
+        gpu_memory_fraction: GPU内存使用限制比例(0.0-1.0)
+    """
+    if torch.cuda.is_available():
+        # 设置CUDA内存分配器限制
+        torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction)
+        print(f"已限制GPU内存使用为总内存的{gpu_memory_fraction*100:.1f}%")
+        
+        # 尝试设置内存分配策略
+        try:
+            # 如果pytorch版本支持，设置更保守的内存分配策略
+            if hasattr(torch.cuda, 'memory_stats') and callable(getattr(torch.cuda, 'memory_stats', None)):
+                torch.cuda.empty_cache()
+                print("设置保守内存分配策略")
+        except:
+            pass
+
+
+def tensor_to_cpu_or_detach(tensor):
+    """
+    优化张量，减少内存使用
+    将不需要梯度的张量转移到CPU或进行分离
+    
+    Args:
+        tensor: 输入张量
+    
+    Returns:
+        优化后的张量
+    """
+    if tensor is None:
+        return None
+        
+    if isinstance(tensor, torch.Tensor):
+        if tensor.requires_grad:
+            return tensor.detach()
+        else:
+            return tensor.cpu() if tensor.device.type == "cuda" else tensor
+    return tensor
+
+
+def deep_tensor_cleanup(var_dict):
+    """
+    深度清理字典中的张量
+    
+    Args:
+        var_dict: 包含张量的字典
+    """
+    for key, value in var_dict.items():
+        if isinstance(value, torch.Tensor):
+            del value
+        elif isinstance(value, dict):
+            deep_tensor_cleanup(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, torch.Tensor):
+                    del item
+    
+    # 显式触发垃圾回收
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def cyclic_memory_cleanup(frequency=10, current_step=0):
+    """
+    周期性执行内存清理
+    每隔指定步数执行一次彻底清理
+    
+    Args:
+        frequency: 清理频率（步数）
+        current_step: 当前步数
+    
+    Returns:
+        bool: 是否执行了清理
+    """
+    if current_step % frequency == 0:
+        aggressive_memory_cleanup()
+        return True
+    return False
+
+
+def optimize_sdxl_memory(unet, vae, text_encoder, text_encoder_2=None):
+    """
+    特别针对SDXL模型的内存优化
+    
+    Args:
+        unet: UNet模型
+        vae: VAE模型
+        text_encoder: 第一文本编码器
+        text_encoder_2: 第二文本编码器
+    """
+    # 使用half精度
+    try:
+        vae.half()
+        print("已将VAE转换为半精度")
+    except Exception as e:
+        print(f"VAE转换为半精度失败: {e}")
+    
+    # 设置注意力处理器的cache大小
+    try:
+        if hasattr(unet, "set_attention_cake_size"):
+            unet.set_attention_cache_size(1)  # 最小缓存大小
+            print("已设置UNet注意力缓存大小为最小值")
+    except:
+        pass
+    
+    # 确保文本编码器中的权重按需加载
+    if text_encoder is not None:
+        if hasattr(text_encoder, "gradient_checkpointing_enable"):
+            text_encoder.gradient_checkpointing_enable()
+    
+    if text_encoder_2 is not None:
+        if hasattr(text_encoder_2, "gradient_checkpointing_enable"):
+            text_encoder_2.gradient_checkpointing_enable()
+    
+    print("已应用SDXL特定内存优化")
+    
+    return unet, vae, text_encoder, text_encoder_2
+
 
 if __name__ == "__main__":
     # 简单测试
