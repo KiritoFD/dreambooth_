@@ -1,0 +1,81 @@
+Date : 2025-05-09 02:42:46
+Directory : c:\GitHub\dreambooth
+Total : 42 files,  54258 codes, 392 comments, 925 blanks, all 55575 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| JSON     |         11 |     49,807 |          0 |         11 |     49,818 |
+| Python   |         28 |      4,050 |        392 |        865 |      5,307 |
+| Batch    |          1 |        300 |          0 |          1 |        301 |
+| Markdown |          2 |        101 |          0 |         48 |        149 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++---------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                  | files      | code       | comment    | blank      | total      |
++---------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                     |         42 |     54,258 |        392 |        925 |     55,575 |
+| . (Files)                                                                             |         17 |      2,687 |        212 |        513 |      3,412 |
+| db_modules                                                                            |         14 |      1,744 |        158 |        377 |      2,279 |
+| stable-diffusion-v1-5                                                                 |         10 |     49,722 |          0 |         10 |     49,732 |
+| stable-diffusion-v1-5 (Files)                                                         |          1 |         38 |          0 |          1 |         39 |
+| stable-diffusion-v1-5\feature_extractor                                               |          1 |         27 |          0 |          1 |         28 |
+| stable-diffusion-v1-5\safety_checker                                                  |          1 |         47 |          0 |          1 |         48 |
+| stable-diffusion-v1-5\scheduler                                                       |          1 |         15 |          0 |          1 |         16 |
+| stable-diffusion-v1-5\text_encoder                                                    |          1 |         24 |          0 |          1 |         25 |
+| stable-diffusion-v1-5\tokenizer                                                       |          3 |     49,465 |          0 |          3 |     49,468 |
+| stable-diffusion-v1-5\unet                                                            |          1 |         68 |          0 |          1 |         69 |
+| stable-diffusion-v1-5\vae                                                             |          1 |         38 |          0 |          1 |         39 |
+| utils                                                                                 |          1 |        105 |         22 |         25 |        152 |
++---------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++---------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                                                              | language | code       | comment    | blank      | total      |
++---------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| c:\GitHub\dreambooth\README.md                                                        | Markdown |         28 |          0 |         14 |         42 |
+| c:\GitHub\dreambooth\Untitled-1.bat                                                   | Batch    |        300 |          0 |          1 |        301 |
+| c:\GitHub\dreambooth\auto_train.py                                                    | Python   |         98 |         21 |         23 |        142 |
+| c:\GitHub\dreambooth\config.json                                                      | JSON     |         85 |          0 |          1 |         86 |
+| c:\GitHub\dreambooth\db_modules\__init__.py                                           | Python   |         19 |          1 |          3 |         23 |
+| c:\GitHub\dreambooth\db_modules\debugging.py                                          | Python   |        280 |         26 |         58 |        364 |
+| c:\GitHub\dreambooth\db_modules\loss_calculation.py                                   | Python   |         99 |         17 |         24 |        140 |
+| c:\GitHub\dreambooth\db_modules\loss_debugging.py                                     | Python   |          0 |          0 |          1 |          1 |
+| c:\GitHub\dreambooth\db_modules\loss_monitor.py                                       | Python   |        156 |         14 |         41 |        211 |
+| c:\GitHub\dreambooth\db_modules\memory_optimization.py                                | Python   |        214 |         17 |         47 |        278 |
+| c:\GitHub\dreambooth\db_modules\model_loader.py                                       | Python   |        163 |         15 |         37 |        215 |
+| c:\GitHub\dreambooth\db_modules\model_saving.py                                       | Python   |         74 |          3 |         17 |         94 |
+| c:\GitHub\dreambooth\db_modules\model_util.py                                         | Python   |        105 |          9 |         18 |        132 |
+| c:\GitHub\dreambooth\db_modules\prior_generation.py                                   | Python   |         80 |         12 |         20 |        112 |
+| c:\GitHub\dreambooth\db_modules\tokenizer_fix.py                                      | Python   |         91 |         12 |         22 |        125 |
+| c:\GitHub\dreambooth\db_modules\training_initialization.py                            | Python   |        166 |         11 |         22 |        199 |
+| c:\GitHub\dreambooth\db_modules\training_loop.py                                      | Python   |        181 |          3 |         39 |        223 |
+| c:\GitHub\dreambooth\db_modules\training_utils.py                                     | Python   |        116 |         18 |         28 |        162 |
+| c:\GitHub\dreambooth\debug_tools.py                                                   | Python   |        135 |         11 |         33 |        179 |
+| c:\GitHub\dreambooth\download.py                                                      | Python   |          3 |          0 |          1 |          4 |
+| c:\GitHub\dreambooth\dreambooth.py                                                    | Python   |        487 |         60 |         95 |        642 |
+| c:\GitHub\dreambooth\generate.py                                                      | Python   |         47 |          7 |         12 |         66 |
+| c:\GitHub\dreambooth\generate_class_images.py                                         | Python   |         77 |          8 |         17 |        102 |
+| c:\GitHub\dreambooth\inference.py                                                     | Python   |        296 |         35 |         54 |        385 |
+| c:\GitHub\dreambooth\low_memory_helper.py                                             | Python   |        130 |          8 |         16 |        154 |
+| c:\GitHub\dreambooth\main.py                                                          | Python   |        114 |          3 |         27 |        144 |
+| c:\GitHub\dreambooth\memory_optimization.py                                           | Python   |        214 |         17 |         47 |        278 |
+| c:\GitHub\dreambooth\model_download_guide.md                                          | Markdown |         73 |          0 |         34 |        107 |
+| c:\GitHub\dreambooth\patch_tokenization.py                                            | Python   |          0 |          0 |          1 |          1 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\feature_extractor\preprocessor_config.json | JSON     |         27 |          0 |          1 |         28 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\model_index.json                           | JSON     |         38 |          0 |          1 |         39 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\safety_checker\config.json                 | JSON     |         47 |          0 |          1 |         48 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\scheduler\scheduler_config.json            | JSON     |         15 |          0 |          1 |         16 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\text_encoder\config.json                   | JSON     |         24 |          0 |          1 |         25 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\tokenizer\special_tokens_map.json          | JSON     |         24 |          0 |          1 |         25 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\tokenizer\tokenizer_config.json            | JSON     |         31 |          0 |          1 |         32 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\tokenizer\vocab.json                       | JSON     |     49,410 |          0 |          1 |     49,411 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\unet\config.json                           | JSON     |         68 |          0 |          1 |         69 |
+| c:\GitHub\dreambooth\stable-diffusion-v1-5\vae\config.json                            | JSON     |         38 |          0 |          1 |         39 |
+| c:\GitHub\dreambooth\theory_notes.py                                                  | Python   |        521 |         36 |        118 |        675 |
+| c:\GitHub\dreambooth\utils.py                                                         | Python   |         79 |          6 |         19 |        104 |
+| c:\GitHub\dreambooth\utils\plot_training_loss.py                                      | Python   |        105 |         22 |         25 |        152 |
+| Total                                                                                 |          |     54,258 |        392 |        925 |     55,575 |
++---------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+

@@ -138,23 +138,21 @@ class DreamBoothDataset(Dataset):
             image = self.instance_images[idx % len(self.instance_images)]
             is_instance_current = True
             self.last_was_instance = True
-            print(f"[DreamBoothDataset DEBUG] 强制返回实例图片，idx: {idx}, 使用实例索引: {idx % len(self.instance_images)}")
         elif idx < len(self.instance_images):
             image = self.instance_images[idx]
             is_instance_current = True
             self.last_was_instance = True
-            print(f"[DreamBoothDataset DEBUG] 正常索引返回实例图片。")
         elif idx < len(self.instance_images) + len(self.class_images):
             image = self.class_images[idx - len(self.instance_images)]
             is_instance_current = False
             self.last_was_instance = False
-            print(f"[DreamBoothDataset DEBUG] 正常索引返回类别图片。")
         else:
             # This case should ideally not be hit if __len__ is correct and DataLoader respects it.
             print(f"[DreamBoothDataset DEBUG CRITICAL] Index {idx} is out of bounds. Dataset length: {len(self)}")
             raise IndexError(f"Index {idx} out of bounds for dataset with length {len(self)}")
 
-        print(f"[DreamBoothDataset DEBUG] Determined is_instance for idx {idx}: {is_instance_current}")
+        image_type_str = "实例 (instance)" if is_instance_current else "类别 (class)"
+        print(f"正在加载图片 {idx + 1}/{len(self)} (类型: {image_type_str}) 用于准备训练批次。")
 
         image_np = np.array(image).astype(np.float32)
         image_tensor = torch.from_numpy(image_np / 127.5 - 1.0)

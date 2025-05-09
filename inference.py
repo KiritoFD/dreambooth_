@@ -143,46 +143,56 @@ def generate_high_quality_images(
             # 启用VAE切片以减少内存使用并提高稳定性
             pipe.enable_vae_slicing()
     
-    if config["inference"].get("high_quality_mode", False):
-        print("已启用高质量模式，生成可能较慢...")
-    
     # 生成图像
     images = []
     for i in range(0, num_images, max(1, config["inference"].get("vae_batch_size", num_images))):
         batch_size = min(num_images - i, config["inference"].get("vae_batch_size", num_images))
         
-        # 根据是否使用高质量模式选择不同的生成策略
+        # 重新设计的高质量模式 - 更简单但更可靠
         if config["inference"].get("high_quality_mode", False):
-            # 第一阶段: 轮廓生成
-            print(f"批次 {i+1}/{num_images}: 第1阶段 - 生成基础轮廓...")
-            first_pass = pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                height=height,
-                width=width,
-                num_images_per_prompt=batch_size,
-                num_inference_steps=int(num_inference_steps * 0.7),  # 使用较少步数
-                guidance_scale=guidance_scale * 0.8,  # 较低的引导尺度以获得更多样性
-                generator=generator
-            ).images
+            print(f"批次 {i+1}/{num_images}: 使用增强的高质量模式")
             
-            # 第二阶段: 细节增强
-            print(f"批次 {i+1}/{num_images}: 第2阶段 - 增强细节...")
-            latents = pipe.vae.encode([pipe.image_processor.preprocess(img) for img in first_pass]).latent_dist.sample()
-            latents = latents * 0.18215  # 缩放因子
+            # 高质量模式的增强参数
+            hq_steps = int(num_inference_steps * 1.5)  # 50% 更多的步数
+            hq_guidance = guidance_scale * 1.1  # 略微提高引导尺度
             
-            batch_images = pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                height=height,
-                width=width,
-                num_images_per_prompt=batch_size,
-                num_inference_steps=num_inference_steps,  # 使用完整步数
-                guidance_scale=guidance_scale,
-                latents=latents,  # 使用第一阶段的隐变量作为起点
-                generator=generator,
-                noise_offset=noise_offset if noise_offset > 0 else None,
-            ).images
+            # 增强负面提示
+            enhanced_negative = negative_prompt
+            if "deformed, disfigured, malformed" not in enhanced_negative:
+                enhanced_negative = negative_prompt + ", deformed, disfigured, malformed limbs, missing limbs, bad anatomy, bad proportions"
+            
+            print(f"· 增强步数: {hq_steps}")
+            print(f"· 调整引导尺度: {hq_guidance}")
+            print(f"· 使用增强的负面提示")
+            
+            # 单阶段高质量生成
+            try:
+                batch_images = pipe(
+                    prompt=prompt,
+                    negative_prompt=enhanced_negative,
+                    height=height,
+                    width=width,
+                    num_images_per_prompt=batch_size,
+                    num_inference_steps=hq_steps,
+                    guidance_scale=hq_guidance,
+                    generator=generator,
+                    noise_offset=noise_offset if noise_offset > 0 else 0.05,  # 小的噪声偏移有时可以帮助改善细节
+                ).images
+                
+                images.extend(batch_images)
+            except Exception as e:
+                print(f"高质量生成出错: {e}, 回退到标准模式")
+                batch_images = pipe(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    height=height,
+                    width=width,
+                    num_images_per_prompt=batch_size,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                ).images
+                images.extend(batch_images)
         else:
             # 普通模式: 直接生成
             print(f"批次 {i+1}/{num_images}: 标准生成模式")
@@ -197,8 +207,8 @@ def generate_high_quality_images(
                 generator=generator,
                 noise_offset=noise_offset if noise_offset > 0 else None,
             ).images
-        
-        images.extend(batch_images)
+            
+            images.extend(batch_images)
     
     print(f"成功生成 {len(images)} 张图像")
     return images
@@ -217,6 +227,106 @@ def save_images(images, output_dir, prefix="generated"):
         print(f"已保存图像到 {path}")
     
     return saved_paths
+
+def perform_inference(model_dir, prompt, num_images=1, seed=None, height=512, width=512, config=None):
+    """
+    执行完整的推理流程：加载模型、生成图像并保存
+    
+    Args:
+        model_dir: 模型目录
+        prompt: 提示词
+        num_images: 要生成的图像数量
+        seed: 随机种子
+        height: 图像高度
+        width: 图像宽度
+        config: 配置对象，如果未提供将构建默认配置
+        
+    Returns:
+        list: 保存的图像路径列表
+    """
+    # 如果没有提供配置，创建一个基本配置
+    if config is None:
+        try:
+            # 尝试从model_dir中加载配置
+            import json
+            config_path = os.path.join(os.path.dirname(model_dir), "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                print(f"已从 {config_path} 加载配置")
+            else:
+                # 创建默认配置
+                config = {
+                    "paths": {"output_dir": model_dir},
+                    "inference": {
+                        "num_inference_steps": 50,
+                        "guidance_scale": 7.5,
+                        "negative_prompt": "ugly, blurry, poor quality",
+                        "scheduler": "DPMSolverMultistep",
+                        "use_karras_sigmas": True,
+                        "noise_offset": 0.1,
+                        "vae_batch_size": 1,
+                        "high_quality_mode": False
+                    },
+                    "memory_optimization": {"xformers_optimization": True}
+                }
+                print("未提供配置，使用默认推理设置")
+        except Exception as e:
+            print(f"创建配置时出错: {e}")
+            # 最小化的配置
+            config = {
+                "paths": {"output_dir": model_dir}, 
+                "inference": {},
+                "memory_optimization": {}
+            }
+
+    # 确保配置包含必要的路径
+    if "paths" not in config:
+        config["paths"] = {}
+    config["paths"]["output_dir"] = model_dir
+
+    # 确保配置包含必要的推理设置
+    if "inference" not in config:
+        config["inference"] = {}
+    
+    # 确保配置包含必要的内存优化设置
+    if "memory_optimization" not in config:
+        config["memory_optimization"] = {}
+    
+    # 确定设备
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"使用设备: {device}")
+    
+    try:
+        # 加载模型
+        print(f"正在加载模型...")
+        pipe = load_pipeline_from_config(config, device)
+        
+        # 生成图像
+        print(f"开始生成图像...")
+        images = generate_high_quality_images(
+            pipe,
+            prompt,
+            config,
+            height=height,
+            width=width,
+            num_images=num_images,
+            seed=seed
+        )
+        
+        # 保存图像
+        output_dir = os.path.join(model_dir, "generated_images")
+        prefix = prompt.split()[:3]  # 使用提示词的前几个词作为前缀
+        prefix = "_".join(prefix).replace(",", "").replace(".", "")
+        saved_paths = save_images(images, output_dir, prefix=prefix)
+        
+        return saved_paths
+        
+    except Exception as e:
+        print(f"推理过程中出错: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 if __name__ == "__main__":
     import argparse

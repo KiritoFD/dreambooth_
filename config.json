@@ -10,7 +10,7 @@
     "class_prompt": "a furry robotic monky",
     "resolution": 512,
     "center_crop": true,
-    "train_batch_size": 32,
+    "train_batch_size": 24,
     "dataloader_num_workers": 0
   },
   "training": {

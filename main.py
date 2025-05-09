@@ -104,16 +104,17 @@ def main():
         
         # 调用推理功能
         try:
-            from inference import perform_inference
-            
+            from inference import perform_inference          
             num_images = args.num_images
             seed = args.seed
             
+            # 传递完整的配置数据
             image_paths = perform_inference(
                 model_dir=output_model_path,
                 prompt=infer_prompt,
                 num_images=num_images,
-                seed=seed
+                seed=seed,
+                config=config_data  # 传递完整的配置
             )
             
             if image_paths:
