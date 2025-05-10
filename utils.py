@@ -76,7 +76,7 @@ def inference(model_path, prompt, num_images=1, output_image_path=None):
     # 加载模型
     pipeline = StableDiffusionPipeline.from_pretrained(model_path)
     if torch.cuda.is_available():
-        pipeline = pipeline.to("cuda")
+        pipeline = pipeline.to("cuda:0")
     
     # 生成图像
     print(f"使用提示词: {prompt}")

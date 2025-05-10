@@ -31,7 +31,7 @@ def ensure_device_consistency(
         model_device = next(model.parameters()).device
     except StopIteration:
         # 模型没有参数，使用当前设备
-        model_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     # 如果指定了目标设备，使用指定的设备
     device = target_device if target_device is not None else model_device

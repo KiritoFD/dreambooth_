@@ -116,7 +116,7 @@ class DreamBoothDataset(Dataset):
     def __init__(self, instance_data_root, instance_prompt, tokenizer, 
                  size=512, center_crop=False, use_template=False,
                  template_file=None, overwrite_prompts=False,
-                 text_encoder_type="SDv1", device="cuda", transform_type=None,
+                 text_encoder_type="SDv1", device="cuda:0", transform_type=None,
                  class_data_root=None, class_prompt=None, debug=True):
         self.size = size
         self.center_crop = center_crop

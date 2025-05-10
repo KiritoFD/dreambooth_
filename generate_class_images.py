@@ -45,7 +45,7 @@ def main(args):
     os.makedirs(output_dir, exist_ok=True)
     
     # 设置设备
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"使用设备: {device}")
     
     # 加载模型
@@ -53,12 +53,12 @@ def main(args):
     try:
         pipeline = StableDiffusionPipeline.from_pretrained(
             args.model_id,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            torch_dtype=torch.float16 if device == "cuda:0" else torch.float32
         )
         pipeline = pipeline.to(device)
         
         # 设置内存优化
-        if device == "cuda":
+        if device == "cuda:0":
             pipeline.enable_attention_slicing()
             if args.enable_xformers:
                 try:

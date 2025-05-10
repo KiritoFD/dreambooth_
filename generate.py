@@ -24,7 +24,7 @@ def main():
         config = json.load(f)
     
     # 确定设备
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"使用设备: {device}")
     
     # 设置提示

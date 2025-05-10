@@ -186,7 +186,7 @@ def compute_loss(
         
         # 更新弃用的autocast API
         text_encoder_precision_context = torch.amp.autocast(
-            "cuda", 
+            "cuda:0", 
             dtype=mixed_precision_dtype if config["memory_optimization"].get("lower_text_encoder_precision", False) else torch.float32
         ) if config["memory_optimization"].get("lower_text_encoder_precision", False) else torch.no_grad()
         
@@ -358,7 +358,7 @@ def compute_loss(
         
         # 计算损失时使用混合精度来减少显存使用
         loss_precision_context = torch.amp.autocast(
-            "cuda", 
+            "cuda:0", 
             dtype=torch.float32  # 损失计算通常使用float32以确保稳定性
         ) if config["memory_optimization"].get("lower_loss_precision", False) else torch.no_grad()
         

@@ -6,7 +6,7 @@
     "output_dir": "./output"
   },
   "dataset": {
-    "instance_prompt": "a jxy furry robotic monkey",
+    "instance_prompt": "a purpul jxy furry robotic monkey",
     "class_prompt": "a furry robotic monky",
     "resolution": 1024,
     "center_crop": true,

@@ -132,7 +132,7 @@ def optimize_model_for_training(unet, text_encoder, config):
     return unet, text_encoder
 
 
-def optimize_for_inference(model, device="cuda"):
+def optimize_for_inference(model, device="cuda:0"):
     """
     优化模型用于推理，减少内存占用
     
@@ -144,7 +144,7 @@ def optimize_for_inference(model, device="cuda"):
         优化后的模型
     """
     # 设置为最节约内存的方式
-    if device == "cuda" and torch.cuda.is_available():
+    if device == "cuda:0" and torch.cuda.is_available():
         # 激活GPU内存优化
         try:
             # 使用torch 2.0的编译功能

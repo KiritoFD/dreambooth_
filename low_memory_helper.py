@@ -68,7 +68,7 @@ class LowMemoryConfig:
                 gradient_checkpointing=False
             )
 
-def optimize_for_inference(model, device="cuda"):
+def optimize_for_inference(model, device="cuda:0"):
     """优化模型用于推理，减少内存占用"""
     # 启用融合kernels
     try:
@@ -82,7 +82,7 @@ def optimize_for_inference(model, device="cuda"):
             print("无法启用内存优化方法")
     
     # 使用半精度
-    if "cuda" in device:
+    if "cuda:0" in device:
         try:
             import torch.nn.functional as F
             

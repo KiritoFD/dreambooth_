@@ -92,71 +92,43 @@ def execute_training_loop(
     params_to_optimize = list(unet.parameters())
     if train_text_encoder_flag:
         params_to_optimize += list(text_encoder.parameters())
+        if text_encoder_2 is not None: # Also add text_encoder_2 params if training text encoders
+            params_to_optimize += list(text_encoder_2.parameters())
     
     # 确保text_encoder_2的状态与text_encoder一致
     if text_encoder_2 is not None:
         if train_text_encoder_flag:
             text_encoder_2.train()
-            # 如果训练文本编码器，也应该将其添加到优化器参数中
-            if train_text_encoder_flag and accelerator.is_main_process:
-                accelerator.print("将text_encoder_2添加到优化器参数中")
-            params_to_optimize += list(text_encoder_2.parameters())
+            text_encoder_2.requires_grad_(True)
         else:
-            if hasattr(text_encoder_2, 'module') and isinstance(text_encoder_2.module, torch.nn.Module):
-                text_encoder_2.module.eval()
-            elif isinstance(text_encoder_2, torch.nn.Module):
-                text_encoder_2.eval()
+            text_encoder_2.eval()
+            text_encoder_2.requires_grad_(False)
     
-    # 确保所有模型在同一个设备上
-    target_device = device
-    
-    # 明确将模型移动到目标设备，不依赖accelerator
-    if vae.device != target_device:
-        print(f"[INFO] 将VAE从 {vae.device} 移动到 {target_device}")
-        vae = vae.to(target_device)
-    
-    if text_encoder.device != target_device:
-        print(f"[INFO] 将文本编码器从 {text_encoder.device} 移动到 {target_device}")
-        text_encoder = text_encoder.to(target_device)
-    
-    if unet.device != target_device:
-        print(f"[INFO] 将UNet从 {unet.device} 移动到 {target_device}")
-        unet = unet.to(target_device)
-    
-    if text_encoder_2 is not None and text_encoder_2.device != target_device:
-        print(f"[INFO] 将文本编码器2从 {text_encoder_2.device} 移动到 {target_device}")
-        text_encoder_2 = text_encoder_2.to(target_device)
-    
-    # 更新dataset的device设置，确保返回的张量已经在正确设备上
-    if isinstance(dataloader.dataset, torch.utils.data.Dataset):
-        if hasattr(dataloader.dataset, 'device'):
-            dataloader.dataset.device = target_device
-            print(f"[INFO] 设置数据集设备为 {target_device}")
-    
+    # Models (unet, text_encoder, vae, text_encoder_2) are already on accelerator.device
+    # due to accelerator.prepare() in dreambooth.py.
+    # The explicit .to(device) calls here are redundant and have been removed.
+    target_device = device # accelerator.device
+
     model_device_info = get_model_device_info({
         "unet": unet, 
         "text_encoder": text_encoder,
         "vae": vae
     })
     if text_encoder_2 is not None:
-        model_device_info["text_encoder_2"] = next(text_encoder_2.parameters()).device
+        model_device_info["text_encoder_2"] = str(next(text_encoder_2.parameters()).device if list(text_encoder_2.parameters()) else "Unknown (no params)")
     
     if accelerator.is_main_process:
-        accelerator.print("[INFO] 模型设备信息:")
-        for model_name, device_str in model_device_info.items():
-            accelerator.print(f"  - {model_name}: {device_str}")
+        accelerator.print(f"模型设备信息 (training_loop start): {model_device_info}")
     
-    # 保证模型初始化在同一设备上，避免反复移动
-    model_device = device
-    accelerator.print(f"[初始化] 确保所有模型在设备 {model_device} 上")
-    
-    # 确保模型被固定到正确的设备上，避免重复移动
-    unet = unet.to(model_device)
-    text_encoder = text_encoder.to(model_device)
-    vae = vae.to(model_device)
-    if text_encoder_2 is not None:
-        text_encoder_2 = text_encoder_2.to(model_device)
-    
+    # The following explicit .to(model_device) calls are also redundant and removed.
+    # model_device = device
+    # accelerator.print(f"[初始化] 确保所有模型在设备 {model_device} 上")
+    # unet = unet.to(model_device)
+    # text_encoder = text_encoder.to(model_device)
+    # vae = vae.to(model_device)
+    # if text_encoder_2 is not None:
+    #    text_encoder_2 = text_encoder_2.to(model_device)
+
     # 创建一个全局模型设备缓存变量
     global _models_on_device
     _models_on_device = True
@@ -314,8 +286,8 @@ def execute_training_loop(
                             global_step, max_train_steps, loss_history, debug_monitor, lr_scheduler, optimizer,
                             image_progress_bar=image_progress, 
                             num_images_in_batch=num_processed_in_batch,
-                            instance_count_in_batch=instance_count, # Pass determined counts
-                            class_count_in_batch=class_count      # Pass determined counts
+                            instance_count_in_batch=int(instance_count), # Explicitly cast to int
+                            class_count_in_batch=int(class_count)      # Explicitly cast to int
                         )
                     
                     if global_step % config_params["print_status_every_n_steps"] == 0 and global_step > 0 and accelerator.is_main_process:
